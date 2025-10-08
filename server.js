@@ -2,10 +2,18 @@
 import express from "express";
 import cors from "cors";
 import { GoogleGenAI } from "@google/genai";
+import XLSX from "xlsx";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Đọc file Excel "books.xlsx" ở thư mục gốc
+const workbook = XLSX.readFile("books.xlsx");
+const sheet = workbook.Sheets[workbook.SheetNames[0]];
+const books = XLSX.utils.sheet_to_json(sheet);
+
+console.log("📚 Danh sách sách trong thư viện:", books);
 
 // SDK sẽ đọc GEMINI_API_KEY từ biến môi trường Render
 const ai = new GoogleGenAI({});
@@ -15,12 +23,25 @@ app.post("/chat", async (req, res) => {
   if (!message) return res.status(400).json({ error: "Thiếu field 'message' trong body" });
 
   try {
+    // Ghép dữ liệu sách thành văn bản
+    const libraryText = books.map(b =>
+      `Tên: ${b["Tên sách"]}, Tác giả: ${b["Tác giả"]}, Vị trí: ${b["Vị trí"]}, Tóm tắt: ${b["Tóm tắt"]}`
+    ).join("\n");
+
+    const prompt = `
+    Người dùng muốn tìm sách: "${message}".
+    Đây là danh sách sách trong thư viện:
+    ${libraryText}
+    
+    Nhiệm vụ:
+    - Chọn ra 1-3 sách phù hợp nhất với nhu cầu người dùng.
+    - Với mỗi sách, trả về: Tên, Tác giả, Vị trí, và một recap ngắn gọn (không dài quá 3 câu).
+    - Nếu không có sách phù hợp, hãy trả lời lịch sự.
+    `;
+
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
-      contents: message,
-      config: {
-        thinkingConfig: { thinkingBudget: 0 }
-      }
+      contents: prompt
     });
 
     const reply =
