@@ -4,31 +4,35 @@ import cors from "cors";
 import { GoogleGenAI } from "@google/genai";
 import XLSX from "xlsx";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Lấy đường dẫn tuyệt đối đến thư mục chứa server.js
+// Đường dẫn tuyệt đối
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Đọc file Excel "books.xlsx"
+// Đọc file Excel
 const excelPath = path.join(__dirname, "books.xlsx");
 const workbook = XLSX.readFile(excelPath);
 const sheet = workbook.Sheets[workbook.SheetNames[0]];
 const books = XLSX.utils.sheet_to_json(sheet);
-
 console.log("📚 Danh sách sách trong thư viện:", books);
 
-// SDK sẽ đọc GEMINI_API_KEY từ biến môi trường Render
-const ai = new GoogleGenAI({});
+// Khởi tạo Gemini SDK
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY
+});
 
-// Endpoint chat
+// API chat
 app.post("/chat", async (req, res) => {
   const { message } = req.body;
-  if (!message) return res.status(400).json({ error: "Thiếu field 'message' trong body" });
+  if (!message) {
+    return res.status(400).json({ error: "Thiếu field 'message' trong body" });
+  }
 
   try {
     const libraryText = books.map(b =>
@@ -41,7 +45,7 @@ app.post("/chat", async (req, res) => {
     ${libraryText}
 
     Nhiệm vụ:
-    - Hiểu tình trạng/mong muốn của người dùng và chọn ra **chính xác 1 quyển sách phù hợp nhất**.
+    - Chọn chính xác 1 quyển sách phù hợp nhất.
     - Trả về:
       Tên sách: ...
       Tác giả: ...
@@ -55,9 +59,10 @@ app.post("/chat", async (req, res) => {
       contents: prompt
     });
 
-    const reply = response?.text ??
+    const reply =
       response?.candidates?.[0]?.content?.parts?.[0]?.text ??
       "Không có phản hồi.";
+
     res.json({ reply });
   } catch (err) {
     console.error("Gemini error:", err);
@@ -65,8 +70,11 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// Cho phép server trả về file index.html khi truy cập root
+// Trả về index.html ở root
 app.use(express.static(__dirname));
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
