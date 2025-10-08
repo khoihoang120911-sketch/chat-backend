@@ -33,7 +33,7 @@ app.post("/chat", async (req, res) => {
     );
 
     const data = await response.json();
-
+    console.log("Gemini API response:", data); // log ra để kiểm tra
     if (data.error) {
       return res.status(400).json({ error: data.error.message });
     }
