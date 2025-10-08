@@ -2,36 +2,84 @@
 <html lang="vi">
 <head>
   <meta charset="UTF-8">
-  <title>Trợ lý tìm sách 📚</title>
+  <title>Trợ lý tìm sách</title>
   <style>
-    body { font-family: Arial, sans-serif; max-width: 700px; margin: auto; padding: 20px; background: #f8f9fa; }
-    h2 { text-align: center; }
-    #chat { border: 1px solid #ccc; background: #fff; padding: 15px; height: 400px; overflow-y: auto; margin-bottom: 10px; border-radius: 8px; }
-    .msg { margin: 8px 0; padding: 8px; border-radius: 5px; }
-    .user { background: #e0f0ff; text-align: right; }
-    .bot { background: #f0ffe0; text-align: left; }
-    input { width: 80%; padding: 10px; border-radius: 5px; border: 1px solid #ccc; }
-    button { padding: 10px 15px; margin-left: 5px; border: none; border-radius: 5px; background: #007bff; color: white; cursor: pointer; }
-    button:hover { background: #0056b3; }
+    body {
+      font-family: Arial, sans-serif;
+      background: #f4f6f9;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 40px;
+      margin: 0;
+    }
+    .container {
+      width: 100%;
+      max-width: 600px;
+      background: white;
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+    }
+    h1 {
+      text-align: center;
+      color: #333;
+    }
+    textarea {
+      width: 100%;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid #ccc;
+      resize: none;
+      margin-top: 10px;
+      font-size: 14px;
+    }
+    button {
+      margin-top: 15px;
+      width: 100%;
+      padding: 12px;
+      background: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #45a049;
+    }
+    .card {
+      margin-top: 20px;
+      padding: 20px;
+      border-radius: 10px;
+      background: #fafafa;
+      border-left: 6px solid #4CAF50;
+      line-height: 1.6;
+    }
+    .card strong {
+      color: #333;
+    }
   </style>
 </head>
 <body>
-  <h2>📚 Trợ lý tìm sách</h2>
-  <div id="chat"></div>
-  <input id="input" placeholder="Mô tả tình trạng hoặc mong muốn của bạn..." />
-  <button onclick="sendMessage()">Gửi</button>
+  <div class="container">
+    <h1>📚 Trợ lý tìm sách</h1>
+    <textarea id="message" rows="3" placeholder="Nhập tình trạng hoặc mong muốn của bạn..."></textarea>
+    <button onclick="sendMessage()">Tìm sách phù hợp</button>
+    <div id="reply" class="card" style="display:none;"></div>
+  </div>
 
   <script>
-    const chat = document.getElementById("chat");
-    const input = document.getElementById("input");
-
     async function sendMessage() {
-      const message = input.value.trim();
-      if (!message) return;
+      const message = document.getElementById("message").value.trim();
+      if (!message) {
+        alert("Vui lòng nhập tình trạng hoặc mong muốn!");
+        return;
+      }
 
-      chat.innerHTML += `<div class="msg user"><b>Bạn:</b> ${message}</div>`;
-      input.value = "";
-      chat.scrollTop = chat.scrollHeight;
+      const replyDiv = document.getElementById("reply");
+      replyDiv.style.display = "block";
+      replyDiv.innerHTML = "⏳ Đang tìm sách phù hợp...";
 
       try {
         const res = await fetch("/chat", {
@@ -39,18 +87,12 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message })
         });
-
         const data = await res.json();
-        chat.innerHTML += `<div class="msg bot"><b>Trợ lý:</b> ${data.reply}</div>`;
+        replyDiv.innerHTML = data.reply;
       } catch (err) {
-        chat.innerHTML += `<div class="msg bot" style="color:red;"><b>Lỗi:</b> ${err.message}</div>`;
+        replyDiv.innerHTML = "❌ Lỗi khi kết nối server!";
       }
-      chat.scrollTop = chat.scrollHeight;
     }
-
-    input.addEventListener("keypress", function (e) {
-      if (e.key === "Enter") sendMessage();
-    });
   </script>
 </body>
 </html>
