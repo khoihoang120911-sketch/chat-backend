@@ -36,14 +36,18 @@ app.post("/chat", async (req, res) => {
     ).join("\n");
 
     const prompt = `
-    Người dùng muốn tìm sách: "${message}".
+    Người dùng mô tả tình trạng hoặc mong muốn của mình: "${message}".
     Đây là danh sách sách trong thư viện:
     ${libraryText}
     
     Nhiệm vụ:
-    - Chọn ra 1-3 sách phù hợp nhất với nhu cầu người dùng.
-    - Với mỗi sách, trả về: Tên, Tác giả, Vị trí, và một recap ngắn gọn (không dài quá 3 câu).
-    - Nếu không có sách phù hợp, hãy trả lời lịch sự.
+    - Hiểu tình trạng/mong muốn của người dùng và chọn ra **chính xác 1 quyển sách phù hợp nhất**.
+    - Trả về theo định dạng sau:
+      Tên sách: ...
+      Tác giả: ...
+      Vị trí: ...
+      Recap: ... (tóm tắt ngắn gọn, tối đa 3 câu)
+    - Nếu không có sách phù hợp, hãy trả lời: "Xin lỗi, hiện không tìm thấy sách nào phù hợp".
     `;
 
     const response = await ai.models.generateContent({
