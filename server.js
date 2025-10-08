@@ -26,10 +26,11 @@ app.post("/chat", async (req, res) => {
     });
 
     const data = await response.json();
-    
-    // Nếu có lỗi từ API
-    if (data.error) {
-      return res.status(400).json({ error: data.error.message });
+    console.log("DeepSeek API response:", data); // 👈 log ra để xem lỗi
+
+    // Nếu có lỗi từ API → trả nguyên response về client
+    if (!response.ok) {
+      return res.status(response.status).json(data);
     }
 
     // Trả về nội dung AI trả lời
