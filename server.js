@@ -7,34 +7,30 @@ app.use(cors());
 app.use(express.json());
 
 // Lấy API key từ biến môi trường (Render → Environment)
-const API_KEY = process.env.API_KEY;
+const API_KEY = process.env.HF_API_KEY;
 
 app.post("/chat", async (req, res) => {
   const { message } = req.body;
 
   try {
-    const response = await fetch("https://api.deepseek.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "deepseek-chat",  // 👈 model của DeepSeek
-        messages: [{ role: "user", content: message }],
-      }),
-    });
+    const response = await fetch(
+      "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          inputs: message, // Hugging Face chỉ cần text input
+        }),
+      }
+    );
 
     const data = await response.json();
-    console.log("DeepSeek API response:", data); // 👈 log ra để xem lỗi
 
-    // Nếu có lỗi từ API → trả nguyên response về client
-    if (!response.ok) {
-      return res.status(response.status).json(data);
-    }
-
-    // Trả về nội dung AI trả lời
-    const reply = data.choices?.[0]?.message?.content || "Không có phản hồi từ AI.";
+    // Hugging Face trả về mảng, lấy text đầu tiên
+    const reply = data[0]?.generated_text || "Không có phản hồi từ AI.";
     res.json({ reply });
 
   } catch (error) {
