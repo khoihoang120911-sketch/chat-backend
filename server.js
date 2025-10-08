@@ -3,13 +3,20 @@ import express from "express";
 import cors from "cors";
 import { GoogleGenAI } from "@google/genai";
 import XLSX from "xlsx";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Đọc file Excel "books.xlsx" ở thư mục gốc
-const workbook = XLSX.readFile("books.xlsx");
+// Lấy đường dẫn tuyệt đối đến thư mục chứa server.js
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Đọc file Excel "books.xlsx" trong cùng thư mục với server.js
+const excelPath = path.join(__dirname, "books.xlsx");
+const workbook = XLSX.readFile(excelPath);
 const sheet = workbook.Sheets[workbook.SheetNames[0]];
 const books = XLSX.utils.sheet_to_json(sheet);
 
