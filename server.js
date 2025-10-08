@@ -6,7 +6,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Lấy API key từ biến môi trường (Render → Environment)
+// API key Hugging Face (Render → Environment)
 const API_KEY = process.env.HF_API_KEY;
 
 app.post("/chat", async (req, res) => {
@@ -22,18 +22,32 @@ app.post("/chat", async (req, res) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          inputs: message, // Hugging Face chỉ cần text input
+          inputs: message,
+          parameters: { max_new_tokens: 200 },
         }),
       }
     );
 
     const data = await response.json();
 
-    // Hugging Face trả về mảng, lấy text đầu tiên
-    const reply = data[0]?.generated_text || "Không có phản hồi từ AI.";
+    // Debug log để xem Hugging Face trả gì
+    console.log("HF response:", JSON.stringify(data));
+
+    if (data.error) {
+      return res.status(400).json({ error: data.error });
+    }
+
+    let reply;
+    if (Array.isArray(data) && data.length > 0) {
+      reply = data[0].generated_text;
+    } else {
+      reply = "Không có phản hồi từ AI.";
+    }
+
     res.json({ reply });
 
   } catch (error) {
+    console.error("Server error:", error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -42,3 +56,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
+
