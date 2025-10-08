@@ -6,7 +6,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// API key của bạn, nhớ set trong Render → Environment
+// Lấy API key từ Render Environment
 const API_KEY = process.env.API_KEY;
 
 app.post("/chat", async (req, res) => {
@@ -23,9 +23,11 @@ app.post("/chat", async (req, res) => {
         body: JSON.stringify({
           contents: [
             {
-              parts: [{ text: message }],
-            },
-          ],
+              parts: [
+                { text: message }
+              ]
+            }
+          ]
         }),
       }
     );
@@ -36,11 +38,12 @@ app.post("/chat", async (req, res) => {
       return res.status(400).json({ error: data.error.message });
     }
 
-    // Lấy text trả về
+    // Lấy câu trả lời từ Gemini
     const reply =
       data.candidates?.[0]?.content?.parts?.[0]?.text ||
       "Không có phản hồi từ Gemini.";
     res.json({ reply });
+
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
