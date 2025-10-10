@@ -1,7 +1,7 @@
-// createTables.js
-import dotenv from "dotenv";
-dotenv.config();
 import pkg from "pg";
+import dotenv from "dotenv";
+
+dotenv.config();
 const { Pool } = pkg;
 
 const pool = new Pool({
@@ -9,30 +9,35 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-async function main(){
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS books (
-      id SERIAL PRIMARY KEY,
-      ten_sach TEXT NOT NULL,
-      tac_gia TEXT NOT NULL,
-      the_loai TEXT,
-      vi_tri TEXT,
-      tom_tat TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
+async function createTables() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS books (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        author TEXT NOT NULL,
+        category TEXT,
+        position TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        CONSTRAINT unique_book UNIQUE (name, author)  -- ✅ thêm constraint
+      )
+    `);
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS conversations (
-      id SERIAL PRIMARY KEY,
-      role TEXT NOT NULL,
-      message TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS conversations (
+        id SERIAL PRIMARY KEY,
+        role TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
 
-  console.log("✅ Tables created/verified.");
-  await pool.end();
+    console.log("✅ Tables created (with UNIQUE constraint).");
+  } catch (err) {
+    console.error("❌ Error creating tables:", err);
+  } finally {
+    pool.end();
+  }
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+createTables();
