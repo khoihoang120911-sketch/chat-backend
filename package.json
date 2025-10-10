@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
+    "fix-schema": "node fixSchema.js",
     "import": "node importBooks.js",
-    "postinstall": "npm run import"
+    "postinstall": "npm run fix-schema && npm run import"
   },
   "dependencies": {
     "@google/generative-ai": "^0.7.0",
