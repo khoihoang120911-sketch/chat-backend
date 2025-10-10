@@ -5,170 +5,158 @@ import { GoogleGenAI } from "@google/genai";
 import XLSX from "xlsx";
 import path from "path";
 import { fileURLToPath } from "url";
-import dotenv from "dotenv";
-
-dotenv.config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Lấy đường dẫn tuyệt đối
+// ====== Đường dẫn file Excel ======
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Đọc file Excel
 const excelPath = path.join(__dirname, "books.xlsx");
-let workbook = XLSX.readFile(excelPath);
-let sheet = workbook.Sheets[workbook.SheetNames[0]];
-let books = XLSX.utils.sheet_to_json(sheet);
 
-// SDK Gemini
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// ====== Load sách từ Excel ======
+function loadBooks() {
+  const workbook = XLSX.readFile(excelPath);
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(sheet);
+}
 
-console.log("📚 Khởi động với", books.length, "sách.");
+// ====== Lưu sách ra Excel ======
+function saveBooks(books) {
+  const ws = XLSX.utils.json_to_sheet(books);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Books");
+  XLSX.writeFile(wb, excelPath);
+}
 
-// =======================
-// API CHAT
-// =======================
+// Khởi tạo thư viện
+let books = loadBooks();
+
+// ====== Gemini API ======
+const ai = new GoogleGenAI({});
+
+// ====== History hội thoại ======
+let history = [];
+
+// ====== Chat endpoint ======
 app.post("/chat", async (req, res) => {
   const { message } = req.body;
   if (!message) return res.status(400).json({ error: "Thiếu message" });
 
   try {
-    // -------------------
-    // XỬ LÝ ADD BOOK
-    // -------------------
+    // === Lệnh thêm sách ===
     if (message.toLowerCase().startsWith("add book")) {
-      const match = message.match(/bn:\s*(.*?); at:\s*(.*)/i);
-      if (!match) {
-        return res.json({ reply: "❌ Sai cú pháp! Ví dụ: add book: bn: Tên sách; at: Tác giả" });
-      }
+      const match = message.match(/bn:\s*(.*?);\s*at:\s*(.*)/i);
+      if (!match) return res.json({ reply: "Sai cú pháp! Dùng: add book: bn: Tên sách; at: Tác giả" });
 
       const tenSach = match[1].trim();
       const tacGia = match[2].trim();
 
-      // Gọi Gemini phân loại + recap
+      // Nhờ Gemini suy luận thể loại + vị trí
       const classifyPrompt = `
-      Hãy phân tích sách với thông tin:
-      - Tên sách: "${tenSach}"
-      - Tác giả: "${tacGia}"
+      Hãy cho biết thể loại và vị trí cho quyển sách sau:
+      Tên: "${tenSach}"
+      Tác giả: "${tacGia}"
 
-      Nhiệm vụ:
-      1. Đưa ra thể loại (ngắn gọn, ví dụ: Văn học, Lịch sử, Khoa học, Tâm lý…).
-      2. Tạo recap ngắn gọn 2 câu.
-      Trả về JSON với các field: { "TheLoai": ..., "TomTat": ... }.
+      Quy tắc:
+      - Thể loại: Văn học, Lịch sử, Khoa học, Tâm lý, Triết học, Khác.
+      - Vị trí: Gồm chữ cái (thể loại) + số kệ. Mỗi kệ chứa tối đa 15 sách. 
+        Ví dụ: "V1" = kệ 1 văn học, "L2" = kệ 2 lịch sử.
+      - Trả về JSON: { "Thể loại": "...", "Vị trí": "..." }
       `;
 
       const classifyRes = await ai.models.generateContent({
         model: "gemini-2.5-flash",
-        contents: classifyPrompt
+        contents: [{ role: "user", parts: [{ text: classifyPrompt }] }]
       });
 
-      let info = {};
+      let result;
       try {
-        info = JSON.parse(classifyRes.response.candidates[0].content.parts[0].text);
-      } catch (e) {
-        info = { TheLoai: "Khác", TomTat: "Chưa có" };
+        result = JSON.parse(classifyRes.response.candidates[0].content.parts[0].text);
+      } catch {
+        result = { "Thể loại": "Khác", "Vị trí": "K1" };
       }
-
-      // Tính vị trí: 15 quyển / kệ
-      const loai = info.TheLoai || "Khác";
-      const prefix = loai[0].toUpperCase();
-      const count = books.filter(b => (b["Thể loại"] || "").startsWith(loai)).length;
-      const ke = Math.floor(count / 15) + 1;
-      const viTri = `${prefix}${ke}`;
 
       const newBook = {
         "Tên sách": tenSach,
         "Tác giả": tacGia,
-        "Thể loại": loai,
-        "Vị trí": viTri,
-        "Tóm tắt": info.TomTat
+        "Thể loại": result["Thể loại"] || "Khác",
+        "Vị trí": result["Vị trí"] || "K1",
+        "Tóm tắt": "Chưa có"
       };
 
       books.push(newBook);
+      saveBooks(books);
 
-      // Ghi lại Excel
-      const newSheet = XLSX.utils.json_to_sheet(books);
-      const newWb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(newWb, newSheet, "Books");
-      XLSX.writeFile(newWb, excelPath);
-
-      return res.json({ reply: `✅ Đã thêm sách:\n${JSON.stringify(newBook, null, 2)}` });
+      return res.json({
+        reply: `✅ Đã thêm sách:\n${JSON.stringify(newBook, null, 2)}`
+      });
     }
 
-    // -------------------
-    // XỬ LÝ DELETE BOOK
-    // -------------------
-    if (message.toLowerCase().startsWith("del book")) {
-      const match = message.match(/bn:\s*(.*?); at:\s*(.*)/i);
-      if (!match) {
-        return res.json({ reply: "❌ Sai cú pháp! Ví dụ: del book: bn: Tên sách; at: Tác giả" });
-      }
+    // === Lệnh xóa sách ===
+    if (message.toLowerCase().startsWith("delete book")) {
+      const match = message.match(/bn:\s*(.*?);\s*at:\s*(.*)/i);
+      if (!match) return res.json({ reply: "Sai cú pháp! Dùng: delete book: bn: Tên sách; at: Tác giả" });
 
       const tenSach = match[1].trim();
       const tacGia = match[2].trim();
 
-      const index = books.findIndex(
-        b => b["Tên sách"].toLowerCase() === tenSach.toLowerCase() &&
-             b["Tác giả"].toLowerCase() === tacGia.toLowerCase()
-      );
+      const before = books.length;
+      books = books.filter(b => !(b["Tên sách"] === tenSach && b["Tác giả"] === tacGia));
+      saveBooks(books);
 
-      if (index === -1) {
-        return res.json({ reply: `⚠️ Không tìm thấy sách: ${tenSach} - ${tacGia}` });
+      if (books.length < before) {
+        return res.json({ reply: `🗑️ Đã xóa sách "${tenSach}" của ${tacGia}` });
+      } else {
+        return res.json({ reply: `Không tìm thấy sách "${tenSach}" của ${tacGia}` });
       }
-
-      const removed = books.splice(index, 1)[0];
-
-      // Ghi lại Excel
-      const newSheet = XLSX.utils.json_to_sheet(books);
-      const newWb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(newWb, newSheet, "Books");
-      XLSX.writeFile(newWb, excelPath);
-
-      return res.json({ reply: `🗑️ Đã xóa sách:\n${JSON.stringify(removed, null, 2)}` });
     }
 
-    // -------------------
-    // TÌM SÁCH PHÙ HỢP
-    // -------------------
+    // === Chat tìm sách ===
     const libraryText = books.map(b =>
       `Tên: ${b["Tên sách"]}, Tác giả: ${b["Tác giả"]}, Thể loại: ${b["Thể loại"]}, Vị trí: ${b["Vị trí"]}, Tóm tắt: ${b["Tóm tắt"]}`
     ).join("\n");
 
     const prompt = `
-    Người dùng mô tả: "${message}".
-    Đây là danh sách sách:
+    Người dùng: "${message}".
+    Đây là danh sách sách trong thư viện:
     ${libraryText}
 
     Nhiệm vụ:
-    - Chọn 1 quyển sách phù hợp nhất.
-    - Trả về định dạng:
+    - Hiểu tình trạng/mong muốn của người dùng.
+    - Chọn đúng **1 quyển sách phù hợp nhất**.
+    - Trả về:
       Tên sách: ...
       Tác giả: ...
       Vị trí: ...
       Recap: ... (tối đa 3 câu)
-    - Nếu không có sách phù hợp, trả lời: "Xin lỗi, không tìm thấy sách nào phù hợp".
+    - Nếu không có sách phù hợp: "Xin lỗi, hiện không tìm thấy sách nào phù hợp".
     `;
 
+    // Lưu input vào history
+    history.push({ role: "user", parts: [{ text: message }] });
+
+    // Gọi Gemini với toàn bộ history
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
-      contents: prompt
+      contents: [...history, { role: "user", parts: [{ text: prompt }] }]
     });
 
     const reply = response.response.candidates[0].content.parts[0].text;
+
+    // Lưu output vào history
+    history.push({ role: "model", parts: [{ text: reply }] });
+
     res.json({ reply });
 
   } catch (err) {
     console.error("Gemini error:", err);
-    res.status(500).json({ error: err?.message ?? String(err) });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// =======================
-// STATIC + RUN
-// =======================
+// Serve frontend
 app.use(express.static(__dirname));
 
 const PORT = process.env.PORT || 3000;
