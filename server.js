@@ -49,49 +49,41 @@ async function initTables() {
 }
 await initTables();
 
-// ===== Seed dữ liệu lần đầu =====
+// ===== Seed dữ liệu nếu DB trống =====
 import("./seedBooks.js");
 
-// ===== Helper: Gemini suy luận category =====
-async function inferCategory(bookName, author) {
+// ===== Helper: tự động suy luận thể loại + gán vị trí =====
+async function inferCategoryAndPosition(bookName, author) {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
   const prompt = `
 Bạn là quản thủ thư viện.
-Hãy xác định thể loại từ thông tin sau:
-- Tên sách: "${bookName}"
+Nhiệm vụ: Suy luận "thể loại" cho cuốn sách sau dựa trên tên và tác giả.
+- Tên: "${bookName}"
 - Tác giả: "${author}"
 
-Yêu cầu: chỉ trả về JSON duy nhất:
+Trả về JSON:
 {"category": "Tên thể loại"}
-Ví dụ: Văn học, Lịch sử, Khoa học, Kinh tế, Tâm lý, Triết học, ...
 `;
 
   const response = await model.generateContent(prompt);
+
+  let category = "Chưa rõ";
   try {
-    return JSON.parse(response.response.text()).category || "Chưa rõ";
+    const parsed = JSON.parse(response.response.text());
+    category = parsed.category || "Chưa rõ";
   } catch {
-    return "Chưa rõ";
+    category = "Chưa rõ";
   }
-}
 
-// ===== Helper: Tính toán vị trí (position) =====
-async function calculatePosition(category) {
-  if (!category || category === "Chưa rõ") return "?";
-
-  const prefix = category[0].toUpperCase(); // chữ cái đầu của thể loại
-
-  // Đếm số sách hiện có trong thể loại này
-  const countRes = await pool.query(
-    "SELECT COUNT(*) FROM books WHERE category = $1",
-    [category]
-  );
-  const count = parseInt(countRes.rows[0].count, 10);
-
-  // Tính số kệ = (số sách hiện có / 15) + 1
+  // ===== Tính toán vị trí =====
+  const letter = category && category.length > 0 ? category[0].toUpperCase() : "X";
+  const result = await pool.query("SELECT COUNT(*) FROM books WHERE category=$1", [category]);
+  const count = parseInt(result.rows[0].count, 10) || 0;
   const shelfNumber = Math.floor(count / 15) + 1;
+  const position = `${letter}${shelfNumber}`;
 
-  return `${prefix}${shelfNumber}`;
+  return { category, position };
 }
 
 // ===== Serve index.html =====
@@ -116,13 +108,8 @@ app.post("/chat", async (req, res) => {
         const bookName = match[1].trim();
         const author = match[2].trim();
 
-        // 1. Gemini suy luận thể loại
-        const category = await inferCategory(bookName, author);
+        const { category, position } = await inferCategoryAndPosition(bookName, author);
 
-        // 2. Server tự tính vị trí dựa trên số lượng hiện tại
-        const position = await calculatePosition(category);
-
-        // 3. Lưu DB
         await pool.query(
           "INSERT INTO books (name, author, category, position) VALUES ($1,$2,$3,$4)",
           [bookName, author, category, position]
@@ -152,7 +139,7 @@ app.post("/chat", async (req, res) => {
       }
     }
 
-    // ===== Gợi ý sách =====
+    // ===== Gợi ý sách bằng Gemini =====
     else {
       const result = await pool.query("SELECT name, author, category, position FROM books");
       const books = result.rows;
@@ -164,19 +151,25 @@ app.post("/chat", async (req, res) => {
 
         const prompt = `
 Người dùng vừa nói: "${message}".
-Đây là danh sách sách trong thư viện: ${JSON.stringify(books, null, 2)}.
+
+Danh sách sách trong thư viện: ${JSON.stringify(books, null, 2)}.
 
 Nhiệm vụ:
-1. Chọn 1 cuốn sách phù hợp nhất.
-2. Trả về JSON:
+1. Phân tích nhu cầu hoặc cảm xúc người dùng từ câu trên.
+   Ví dụ: "chán", "buồn" → self-help, tiểu thuyết, văn học;
+          "muốn học", "nghiên cứu" → khoa học, kinh tế;
+          "tò mò vũ trụ" → vật lý, triết học.
+2. Chọn 1 cuốn sách trong DB phù hợp nhất với nhu cầu/cảm xúc đó.
+3. Trả về JSON đúng chuẩn:
 {
   "title": "Tên sách",
   "author": "Tác giả",
-  "category": "Thể loại",
-  "location": "Vị trí",
+  "category": "Thể loại (từ DB)",
+  "location": "Vị trí (từ DB)",
   "reason": "Tại sao cuốn này phù hợp với người dùng"
 }
-⚠️ category và location phải lấy từ DB, không bịa thêm.
+⚠️ category và location phải lấy nguyên từ DB, không được bịa.
+Nếu không tìm thấy sách nào thực sự phù hợp thì chọn ngẫu nhiên một cuốn gần nhất trong DB.
 `;
 
         const response = await model.generateContent(prompt);
