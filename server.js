@@ -47,29 +47,26 @@ async function initTables() {
     )
   `);
 }
-initTables();
+await initTables();
 
-// ===== Helper: suy luận thể loại + vị trí từ Gemini (có tra web) =====
+// ===== Seed dữ liệu nếu DB rỗng =====
+import("./seedBooks.js");
+
+// ===== Helper: suy luận thể loại + vị trí từ Gemini =====
 async function inferCategoryAndPosition(bookName, author) {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
   const prompt = `
 Bạn là quản thủ thư viện. 
-Nhiệm vụ: Tìm trên web và suy luận thể loại & vị trí kệ sách cho cuốn:
+Nhiệm vụ: Suy luận thể loại & vị trí kệ sách cho cuốn:
 - Tên: "${bookName}"
 - Tác giả: "${author}"
-
-Hướng dẫn:
-- Category: tên thể loại (Ví dụ: Văn học, Lịch sử, Khoa học, Kinh tế, Tâm lý...)
-- Position: một ký tự đầu = chữ cái viết tắt của thể loại + số kệ (1-15). Ví dụ: Văn học -> V1, V2, ...
-- Nếu không chắc chắn, trả về: {"category": "Chưa rõ", "position": "?"}
 
 Trả về JSON:
 {"category": "...", "position": "..."}
 `;
 
   const response = await model.generateContent(prompt);
-
   try {
     return JSON.parse(response.response.text());
   } catch {
@@ -131,7 +128,7 @@ app.post("/chat", async (req, res) => {
       }
     }
 
-    // ===== Gợi ý sách theo tâm trạng / câu hỏi =====
+    // ===== Gợi ý sách =====
     else {
       const result = await pool.query("SELECT name, author, category, position FROM books");
       const books = result.rows;
