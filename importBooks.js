@@ -4,7 +4,7 @@ import xlsx from "xlsx";
 
 dotenv.config();
 
-// PostgreSQL setup
+// ===== PostgreSQL setup =====
 const { Pool } = pkg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -13,7 +13,7 @@ const pool = new Pool({
 
 async function importBooks() {
   try {
-    // Đọc file Excel
+    // ===== Đọc file Excel =====
     const workbook = xlsx.readFile("books.xlsx");
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
@@ -21,11 +21,11 @@ async function importBooks() {
 
     console.log(`📖 Đang import ${rows.length} sách từ Excel...`);
 
-    // Xóa toàn bộ dữ liệu cũ
+    // ===== Xóa dữ liệu cũ =====
     await pool.query("TRUNCATE TABLE books RESTART IDENTITY CASCADE");
     console.log("🗑️ Đã xoá sạch dữ liệu cũ trong bảng books.");
 
-    // Import từng dòng
+    // ===== Import từng dòng =====
     for (const row of rows) {
       const name = row["Tên sách"];
       const author = row["Tác giả"];
@@ -41,10 +41,15 @@ async function importBooks() {
         "INSERT INTO books (name, author, category, position) VALUES ($1,$2,$3,$4)",
         [name, author, category, position]
       );
-      console.log(`✅ Đã thêm sách: ${name} (${author})`);
+
+      // Log đầy đủ thông tin sách
+      console.log(`✅ Đã thêm: "${name}" | Tác giả: ${author} | Thể loại: ${category} | Vị trí: ${position}`);
     }
 
-    console.log("🎉 Import thành công!");
+    // ===== Kiểm tra tổng số sách =====
+    const result = await pool.query("SELECT COUNT(*) FROM books");
+    console.log(`🎉 Import thành công! Tổng số sách trong DB: ${result.rows[0].count}`);
+
     process.exit(0);
   } catch (err) {
     console.error("❌ Lỗi khi import:", err);
