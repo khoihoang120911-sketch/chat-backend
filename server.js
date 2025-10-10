@@ -49,7 +49,7 @@ async function initTables() {
 }
 await initTables();
 
-// ===== Seed dữ liệu nếu DB rỗng =====
+// ===== Seed dữ liệu lần đầu =====
 import("./seedBooks.js");
 
 // ===== Helper: suy luận thể loại + vị trí từ Gemini =====
@@ -85,7 +85,6 @@ app.post("/chat", async (req, res) => {
   if (!message) return res.status(400).json({ error: "Thiếu 'message'" });
 
   try {
-    // Lưu user message
     await pool.query("INSERT INTO conversations (role, message) VALUES ($1,$2)", ["user", message]);
 
     let reply = "";
@@ -167,9 +166,7 @@ Nhiệm vụ:
       }
     }
 
-    // Lưu assistant reply
     await pool.query("INSERT INTO conversations (role, message) VALUES ($1,$2)", ["assistant", reply]);
-
     res.json({ reply });
   } catch (err) {
     console.error("Chat error:", err);
