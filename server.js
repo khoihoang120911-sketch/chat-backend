@@ -1,187 +1,113 @@
 import express from "express";
-import bodyParser from "body-parser";
-import pkg from "pg";
+import cors from "cors";
 import dotenv from "dotenv";
+import pkg from "pg";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import path from "path";
-import { fileURLToPath } from "url";
 
 dotenv.config();
 
 const app = express();
-app.use(bodyParser.json());
+app.use(cors());
+app.use(express.json());
 
-// ===== Đường dẫn hiện tại =====
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// ===== PostgreSQL setup =====
 const { Pool } = pkg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
 });
 
-// ===== Gemini setup =====
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// ===== Tạo bảng nếu chưa có =====
-async function initTables() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS books (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      author TEXT NOT NULL,
-      category TEXT,
-      position TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
-    )
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS conversations (
-      id SERIAL PRIMARY KEY,
-      role TEXT NOT NULL,
-      message TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW()
-    )
-  `);
-}
-initTables();
-
-// ===== Helper: suy luận thể loại + vị trí từ Gemini (có tra web) =====
-async function inferCategoryAndPosition(bookName, author) {
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-  const prompt = `
-Bạn là quản thủ thư viện. 
-Nhiệm vụ: Tìm trên web và suy luận thể loại & vị trí kệ sách cho cuốn:
-- Tên: "${bookName}"
-- Tác giả: "${author}"
-
-Hướng dẫn:
-- Category: tên thể loại (Ví dụ: Văn học, Lịch sử, Khoa học, Kinh tế, Tâm lý...)
-- Position: một ký tự đầu = chữ cái viết tắt của thể loại + số kệ (1-15). Ví dụ: Văn học -> V1, V2, ...
-- Nếu không chắc chắn, trả về: {"category": "Chưa rõ", "position": "?"}
-
-Trả về JSON:
-{"category": "...", "position": "..."}
-`;
-
-  const response = await model.generateContent(prompt);
-
-  try {
-    return JSON.parse(response.response.text());
-  } catch {
-    return { category: "Chưa rõ", position: "?" };
-  }
+// 🔹 Hàm gọi Gemini (luôn dùng gemini-2.5-flash)
+async function askGemini(prompt) {
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const result = await model.generateContent(prompt);
+  return result.response.text();
 }
 
-// ===== Serve index.html =====
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
-});
-
-// ===== API Chat =====
+// 🔹 Người dùng nói tình trạng → tìm sách
 app.post("/chat", async (req, res) => {
   const { message } = req.body;
-  if (!message) return res.status(400).json({ error: "Thiếu 'message'" });
 
   try {
-    // Lưu user message
-    await pool.query("INSERT INTO conversations (role, message) VALUES ($1,$2)", ["user", message]);
+    // Lấy danh sách sách từ DB
+    const { rows } = await pool.query("SELECT * FROM books");
 
-    let reply = "";
+    // Gửi sách + tình trạng cho Gemini để chọn
+    const prompt = `
+    Người dùng mô tả tình trạng: "${message}".
+    Đây là danh sách sách trong thư viện (tên, tác giả, thể loại, vị trí):
+    ${rows.map(b => `${b.title} - ${b.author} (${b.category}, ${b.position})`).join("\n")}
 
-    // ===== Add book =====
-    if (message.toLowerCase().startsWith("add book")) {
-      const match = message.match(/bn:\s*([^;]+);\s*at:\s*(.+)/i);
-      if (match) {
-        const bookName = match[1].trim();
-        const author = match[2].trim();
-
-        const { category, position } = await inferCategoryAndPosition(bookName, author);
-
-        await pool.query(
-          "INSERT INTO books (name, author, category, position) VALUES ($1,$2,$3,$4)",
-          [bookName, author, category, position]
-        );
-
-        reply = `✅ Đã thêm sách: "${bookName}" (${author})\nThể loại: ${category}\nVị trí: ${position}`;
-      } else {
-        reply = "❌ Sai cú pháp. Hãy dùng: `add book: bn: Tên sách; at: Tác giả`";
-      }
+    👉 Nhiệm vụ của bạn:
+    1. Chọn 1 cuốn sách phù hợp nhất với tình trạng người dùng.
+    2. Tóm tắt (recap) ngắn gọn nội dung chính của cuốn sách.
+    3. Trả về JSON theo dạng:
+    {
+      "title": "...",
+      "author": "...",
+      "category": "...",
+      "position": "...",
+      "recap": "..."
     }
+    `;
 
-    // ===== Delete book =====
-    else if (message.toLowerCase().startsWith("delete book")) {
-      const match = message.match(/bn:\s*([^;]+);\s*at:\s*(.+)/i);
-      if (match) {
-        const bookName = match[1].trim();
-        const author = match[2].trim();
+    const geminiResponse = await askGemini(prompt);
 
-        const result = await pool.query("DELETE FROM books WHERE name=$1 AND author=$2 RETURNING *", [bookName, author]);
-        if (result.rowCount > 0) {
-          reply = `🗑️ Đã xoá sách "${bookName}" của ${author}`;
-        } else {
-          reply = `⚠️ Không tìm thấy sách "${bookName}" của ${author}`;
-        }
-      } else {
-        reply = "❌ Sai cú pháp. Hãy dùng: `delete book: bn: Tên sách; at: Tác giả`";
-      }
-    }
-
-    // ===== Gợi ý sách theo tâm trạng / câu hỏi =====
-    else {
-      const result = await pool.query("SELECT name, author, category, position FROM books");
-      const books = result.rows;
-
-      if (books.length === 0) {
-        reply = "📭 Thư viện hiện chưa có sách.";
-      } else {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-        const prompt = `
-Người dùng vừa nói: "${message}".
-Đây là danh sách sách trong thư viện: ${JSON.stringify(books, null, 2)}.
-
-Nhiệm vụ:
-1. Chọn 1 cuốn sách phù hợp nhất.
-2. Trả về JSON:
-{
-  "title": "Tên sách",
-  "author": "Tác giả",
-  "category": "Thể loại",
-  "location": "Vị trí",
-  "reason": "Tại sao cuốn này phù hợp với người dùng"
-}
-⚠️ category và location phải lấy từ DB, không bịa thêm.
-`;
-
-        const response = await model.generateContent(prompt);
-        const raw = response.response.text();
-
-        try {
-          const book = JSON.parse(raw);
-          reply = `📚 Gợi ý cho bạn: "${book.title}" (Tác giả: ${book.author})\nThể loại: ${book.category}, Vị trí: ${book.location}\n💡 Lý do: ${book.reason}`;
-        } catch {
-          reply = "🤔 Tôi chưa tìm ra cuốn nào phù hợp.";
-        }
-      }
-    }
-
-    // Lưu assistant reply
-    await pool.query("INSERT INTO conversations (role, message) VALUES ($1,$2)", ["assistant", reply]);
-
-    res.json({ reply });
+    res.json({ answer: geminiResponse });
   } catch (err) {
-    console.error("Chat error:", err);
-    res.status(500).json({ error: err.message });
+    console.error("❌ Lỗi /chat:", err);
+    res.status(500).json({ error: "Lỗi server" });
   }
 });
 
-// ===== Start server =====
+// 🔹 Thêm sách mới
+app.post("/add-book", async (req, res) => {
+  let { title, author, category, position } = req.body;
+
+  try {
+    // Nếu thiếu category hoặc position → nhờ Gemini tìm
+    if (!category || !position) {
+      const prompt = `
+      Tôi có sách:
+      - Tên: "${title}"
+      - Tác giả: "${author}"
+
+      Hãy tra cứu nhanh và suy đoán:
+      1. Thể loại (category) của sách này
+      2. Vị trí (position) gợi ý trong thư viện (ví dụ A1, B2, C3...).
+
+      Trả về JSON: { "category": "...", "position": "..." }
+      `;
+      const geminiResponse = await askGemini(prompt);
+
+      try {
+        const parsed = JSON.parse(geminiResponse);
+        category = category || parsed.category;
+        position = position || parsed.position;
+      } catch {
+        console.warn("⚠️ Không parse được Gemini response, dùng mặc định.");
+        if (!category) category = "Chưa phân loại";
+        if (!position) position = "Z0";
+      }
+    }
+
+    await pool.query(
+      "INSERT INTO books (title, author, category, position) VALUES ($1, $2, $3, $4)",
+      [title, author, category, position]
+    );
+
+    res.json({
+      message: "✅ Đã thêm sách thành công",
+      book: { title, author, category, position },
+    });
+  } catch (err) {
+    console.error("❌ Lỗi /add-book:", err);
+    res.status(500).json({ error: "Không thể thêm sách" });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Server đang chạy trên cổng ${PORT}`);
+  console.log(`🚀 Server chạy tại http://localhost:${PORT}`);
 });
