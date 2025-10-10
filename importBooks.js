@@ -1,3 +1,4 @@
+// importBooks.js
 import fs from "fs";
 import xlsx from "xlsx";
 import pkg from "pg";
@@ -6,7 +7,6 @@ import dotenv from "dotenv";
 dotenv.config();
 const { Pool } = pkg;
 
-// Kết nối database
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -19,45 +19,57 @@ async function importBooks() {
       process.exit(1);
     }
 
-    // Đọc Excel
     const workbook = xlsx.readFile("books.xlsx");
     const sheetName = workbook.SheetNames[0];
-    const data = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+    const rows = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
 
-    console.log(`📖 Đang import ${data.length} sách từ file Excel...\n`);
+    console.log(`📖 Đang import ${rows.length} dòng từ books.xlsx...`);
 
-    for (let row of data) {
-      // In ra để debug
+    for (const row of rows) {
+      // Hiển thị row để debug (bạn sẽ thấy log trên Render)
       console.log("👉 Row đọc được:", row);
 
-      // Map cột tiếng Việt
-      const title = row["Tên sách"] || row["title"];
-      const author = row["Tác giả"] || row["author"];
-      const category = row["Thể loại"] || row["category"];
-      const location = row["Vị trí"] || row["location"];
+      const title = row["Tên sách"] || row["title"] || row["Name"] || row["name"];
+      const author = row["Tác giả"] || row["author"] || row["Author"];
+      const category = row["Thể loại"] || row["category"] || row["Category"] || null;
+      const position = row["Vị trí"] || row["position"] || row["Vị trí sách"] || null;
 
       if (!title || !author) {
-        console.warn("⚠️ Bỏ qua vì thiếu dữ liệu:", row);
+        console.warn("⚠️ Bỏ qua vì thiếu tên sách hoặc tác giả:", row);
         continue;
       }
 
       try {
-        await pool.query(
-          `INSERT INTO books (name, author, category, position)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (name, author) DO NOTHING`,
-          [title, author, category, location]
+        // Kiểm tra tồn tại
+        const exists = await pool.query(
+          "SELECT id FROM books WHERE name = $1 AND author = $2 LIMIT 1",
+          [title, author]
         );
-        console.log(`✅ Đã thêm: ${title} (${author})`);
+        if (exists.rowCount > 0) {
+          // update nếu muốn cập nhật thông tin (category/position)
+          await pool.query(
+            `UPDATE books SET category = COALESCE($3, category), position = COALESCE($4, position) WHERE id = $5`,
+            [category, position, category, position, exists.rows[0].id]
+          );
+          console.log(`♻️ Đã cập nhật (đã tồn tại): ${title} (${author})`);
+        } else {
+          await pool.query(
+            `INSERT INTO books (name, author, category, position) VALUES ($1,$2,$3,$4)`,
+            [title, author, category, position]
+          );
+          console.log(`✅ Đã thêm: ${title} (${author})`);
+        }
       } catch (err) {
-        console.error(`❌ Lỗi khi thêm sách "${title}":`, err.message);
+        console.error(`❌ Lỗi khi xử lý "${title}":`, err.message);
       }
     }
 
-    console.log("\n🎉 Import xong!");
+    console.log("🎉 ImportBooks hoàn tất!");
+    await pool.end();
     process.exit(0);
   } catch (err) {
-    console.error("❌ Import thất bại:", err);
+    console.error("❌ Lỗi importBooks:", err);
+    await pool.end();
     process.exit(1);
   }
 }
