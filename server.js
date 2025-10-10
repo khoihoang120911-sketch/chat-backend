@@ -1,174 +1,174 @@
 // server.js
 import express from "express";
-import bodyParser from "body-parser";
 import cors from "cors";
-import dotenv from "dotenv";
-import path from "path";
-import fs from "fs";
+import { GoogleGenAI } from "@google/genai";
 import XLSX from "xlsx";
+import path from "path";
 import { fileURLToPath } from "url";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import dotenv from "dotenv";
 
 dotenv.config();
 
-// Khởi tạo Express
 const app = express();
-app.use(bodyParser.json());
 app.use(cors());
+app.use(express.json());
 
-// Tạo __dirname vì đang dùng module ES
+// Lấy đường dẫn tuyệt đối
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// File Excel
+// Đọc file Excel
 const excelPath = path.join(__dirname, "books.xlsx");
-let workbook, sheet, books = [];
+let workbook = XLSX.readFile(excelPath);
+let sheet = workbook.Sheets[workbook.SheetNames[0]];
+let books = XLSX.utils.sheet_to_json(sheet);
 
-if (fs.existsSync(excelPath)) {
-  workbook = XLSX.readFile(excelPath);
-  const sheetName = workbook.SheetNames[0];
-  sheet = workbook.Sheets[sheetName];
-  books = XLSX.utils.sheet_to_json(sheet);
-} else {
-  workbook = XLSX.utils.book_new();
-  sheet = XLSX.utils.json_to_sheet([]);
-  XLSX.utils.book_append_sheet(workbook, sheet, "Library");
-  books = [];
-  XLSX.writeFile(workbook, excelPath);
-}
+// SDK Gemini
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Lưu file Excel
-function saveBooks() {
-  const newSheet = XLSX.utils.json_to_sheet(books);
-  workbook.Sheets[workbook.SheetNames[0]] = newSheet;
-  XLSX.writeFile(workbook, excelPath);
-}
+console.log("📚 Khởi động với", books.length, "sách.");
 
-// Hàm tạo vị trí dựa trên thể loại
-function assignPosition(category) {
-  const letter = category?.charAt(0)?.toUpperCase() || "X";
-  const sameCategory = books.filter(b => b["Thể loại"]?.charAt(0)?.toUpperCase() === letter);
-  const shelfNumber = Math.floor(sameCategory.length / 15) + 1;
-  return `${letter}${shelfNumber}`;
-}
-
-// Gemini API
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-// Route chat
+// =======================
+// API CHAT
+// =======================
 app.post("/chat", async (req, res) => {
   const { message } = req.body;
-  if (!message) return res.status(400).json({ error: "Thiếu 'message'" });
+  if (!message) return res.status(400).json({ error: "Thiếu message" });
 
   try {
-    // ====== 1. LỆNH THÊM SÁCH ======
+    // -------------------
+    // XỬ LÝ ADD BOOK
+    // -------------------
     if (message.toLowerCase().startsWith("add book")) {
-      const nameMatch = message.match(/bn:\s*([^;]+)/i);
-      const authorMatch = message.match(/at:\s*([^;]+)/i);
-
-      if (!nameMatch || !authorMatch) {
-        return res.json({ reply: "❌ Sai cú pháp. Ví dụ: add book: bn: Tên; at: Tác giả" });
+      const match = message.match(/bn:\s*(.*?); at:\s*(.*)/i);
+      if (!match) {
+        return res.json({ reply: "❌ Sai cú pháp! Ví dụ: add book: bn: Tên sách; at: Tác giả" });
       }
 
-      const bookName = nameMatch[1].trim();
-      const author = authorMatch[1].trim();
+      const tenSach = match[1].trim();
+      const tacGia = match[2].trim();
 
-      // Hỏi Gemini thể loại + tóm tắt
-      const prompt = `Cho tôi biết thể loại và tóm tắt ngắn gọn (2 câu) của sách "${bookName}" của tác giả "${author}".
-Trả lời đúng JSON:
-{
-  "Thể loại": "...",
-  "Tóm tắt": "..."
-}`;
+      // Gọi Gemini phân loại + recap
+      const classifyPrompt = `
+      Hãy phân tích sách với thông tin:
+      - Tên sách: "${tenSach}"
+      - Tác giả: "${tacGia}"
 
-      const aiResp = await genAI.getGenerativeModel({ model: "gemini-1.5-flash" })
-        .generateContent(prompt);
+      Nhiệm vụ:
+      1. Đưa ra thể loại (ngắn gọn, ví dụ: Văn học, Lịch sử, Khoa học, Tâm lý…).
+      2. Tạo recap ngắn gọn 2 câu.
+      Trả về JSON với các field: { "TheLoai": ..., "TomTat": ... }.
+      `;
 
-      let aiText = aiResp.response.text();
-      let category = "Khác", summary = "Chưa có";
+      const classifyRes = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: classifyPrompt
+      });
 
+      let info = {};
       try {
-        const parsed = JSON.parse(aiText);
-        category = parsed["Thể loại"] || "Khác";
-        summary = parsed["Tóm tắt"] || "Chưa có";
-      } catch {
-        console.warn("AI trả về không phải JSON, fallback text:", aiText);
+        info = JSON.parse(classifyRes.response.candidates[0].content.parts[0].text);
+      } catch (e) {
+        info = { TheLoai: "Khác", TomTat: "Chưa có" };
       }
 
-      const position = assignPosition(category);
+      // Tính vị trí: 15 quyển / kệ
+      const loai = info.TheLoai || "Khác";
+      const prefix = loai[0].toUpperCase();
+      const count = books.filter(b => (b["Thể loại"] || "").startsWith(loai)).length;
+      const ke = Math.floor(count / 15) + 1;
+      const viTri = `${prefix}${ke}`;
 
       const newBook = {
-        "Tên sách": bookName,
-        "Tác giả": author,
-        "Thể loại": category,
-        "Vị trí": position,
-        "Tóm tắt": summary
+        "Tên sách": tenSach,
+        "Tác giả": tacGia,
+        "Thể loại": loai,
+        "Vị trí": viTri,
+        "Tóm tắt": info.TomTat
       };
 
       books.push(newBook);
-      saveBooks();
+
+      // Ghi lại Excel
+      const newSheet = XLSX.utils.json_to_sheet(books);
+      const newWb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(newWb, newSheet, "Books");
+      XLSX.writeFile(newWb, excelPath);
 
       return res.json({ reply: `✅ Đã thêm sách:\n${JSON.stringify(newBook, null, 2)}` });
     }
 
-    // ====== 2. LỆNH XÓA SÁCH ======
-    if (message.toLowerCase().startsWith("delete book")) {
-      const nameMatch = message.match(/bn:\s*([^;]+)/i);
-      const authorMatch = message.match(/at:\s*([^;]+)/i);
-
-      if (!nameMatch || !authorMatch) {
-        return res.json({ reply: "❌ Sai cú pháp. Ví dụ: delete book: bn: Tên; at: Tác giả" });
+    // -------------------
+    // XỬ LÝ DELETE BOOK
+    // -------------------
+    if (message.toLowerCase().startsWith("del book")) {
+      const match = message.match(/bn:\s*(.*?); at:\s*(.*)/i);
+      if (!match) {
+        return res.json({ reply: "❌ Sai cú pháp! Ví dụ: del book: bn: Tên sách; at: Tác giả" });
       }
 
-      const bookName = nameMatch[1].trim();
-      const author = authorMatch[1].trim();
+      const tenSach = match[1].trim();
+      const tacGia = match[2].trim();
 
-      const before = books.length;
-      books = books.filter(
-        b => !(b["Tên sách"] === bookName && b["Tác giả"] === author)
+      const index = books.findIndex(
+        b => b["Tên sách"].toLowerCase() === tenSach.toLowerCase() &&
+             b["Tác giả"].toLowerCase() === tacGia.toLowerCase()
       );
-      saveBooks();
 
-      if (books.length < before) {
-        return res.json({ reply: `🗑️ Đã xóa sách "${bookName}" của tác giả "${author}".` });
-      } else {
-        return res.json({ reply: `❌ Không tìm thấy sách "${bookName}" của tác giả "${author}".` });
+      if (index === -1) {
+        return res.json({ reply: `⚠️ Không tìm thấy sách: ${tenSach} - ${tacGia}` });
       }
+
+      const removed = books.splice(index, 1)[0];
+
+      // Ghi lại Excel
+      const newSheet = XLSX.utils.json_to_sheet(books);
+      const newWb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(newWb, newSheet, "Books");
+      XLSX.writeFile(newWb, excelPath);
+
+      return res.json({ reply: `🗑️ Đã xóa sách:\n${JSON.stringify(removed, null, 2)}` });
     }
 
-    // ====== 3. TÌM SÁCH ======
+    // -------------------
+    // TÌM SÁCH PHÙ HỢP
+    // -------------------
     const libraryText = books.map(b =>
       `Tên: ${b["Tên sách"]}, Tác giả: ${b["Tác giả"]}, Thể loại: ${b["Thể loại"]}, Vị trí: ${b["Vị trí"]}, Tóm tắt: ${b["Tóm tắt"]}`
     ).join("\n");
 
     const prompt = `
-Người dùng mô tả mong muốn: "${message}".
-Danh sách sách:
-${libraryText}
+    Người dùng mô tả: "${message}".
+    Đây là danh sách sách:
+    ${libraryText}
 
-Nhiệm vụ:
-- Chọn đúng 1 quyển sách phù hợp nhất.
-- Trả về:
-Tên sách: ...
-Tác giả: ...
-Vị trí: ...
-Recap: ... (tối đa 3 câu)
-- Nếu không có sách phù hợp, trả lời: "Xin lỗi, hiện không tìm thấy sách nào phù hợp".
-`;
+    Nhiệm vụ:
+    - Chọn 1 quyển sách phù hợp nhất.
+    - Trả về định dạng:
+      Tên sách: ...
+      Tác giả: ...
+      Vị trí: ...
+      Recap: ... (tối đa 3 câu)
+    - Nếu không có sách phù hợp, trả lời: "Xin lỗi, không tìm thấy sách nào phù hợp".
+    `;
 
-    const response = await genAI.getGenerativeModel({ model: "gemini-1.5-flash" })
-      .generateContent(prompt);
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt
+    });
 
-    const reply = response.response.text();
+    const reply = response.response.candidates[0].content.parts[0].text;
     res.json({ reply });
 
   } catch (err) {
     console.error("Gemini error:", err);
-    res.status(500).json({ error: err?.message || "Lỗi không xác định" });
+    res.status(500).json({ error: err?.message ?? String(err) });
   }
 });
 
-// Serve file tĩnh (index.html)
+// =======================
+// STATIC + RUN
+// =======================
 app.use(express.static(__dirname));
 
 const PORT = process.env.PORT || 3000;
