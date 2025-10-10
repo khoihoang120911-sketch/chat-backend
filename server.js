@@ -9,6 +9,7 @@ dotenv.config();
 const app = express();
 app.use(bodyParser.json());
 
+// PostgreSQL setup
 const { Pool } = pkg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -17,6 +18,7 @@ const pool = new Pool({
 
 // Gemini setup
 const ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 // ===== Tạo bảng nếu chưa có =====
 async function initTables() {
@@ -39,67 +41,26 @@ async function initTables() {
       created_at TIMESTAMP DEFAULT NOW()
     )
   `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS categories (
-      id SERIAL PRIMARY KEY,
-      name TEXT UNIQUE NOT NULL,
-      prefix CHAR(1) NOT NULL
-    )
-  `);
-
-  // Seed categories nếu trống
-  const existing = await pool.query("SELECT COUNT(*) FROM categories");
-  if (parseInt(existing.rows[0].count) === 0) {
-    await pool.query(`
-      INSERT INTO categories (name, prefix) VALUES
-      ('Công nghệ','A'),
-      ('Văn học','B'),
-      ('Lịch sử','C'),
-      ('Kinh tế','D'),
-      ('Khoa học','E')
-    `);
-  }
 }
 initTables();
 
-// ===== Helper: suy luận thể loại =====
-async function inferCategory(bookName, author) {
+// ===== Helper: nhờ Gemini suy luận thể loại & vị trí =====
+async function inferCategoryAndPosition(bookName, author) {
   const prompt = `
   Bạn là quản thủ thư viện.
-  Với sách "${bookName}" của tác giả "${author}", hãy đoán thể loại phù hợp trong các nhóm:
-  - Công nghệ
-  - Văn học
-  - Lịch sử
-  - Kinh tế
-  - Khoa học
+  Với sách "${bookName}" của tác giả "${author}", hãy đoán:
+  - Thể loại (ví dụ: Văn học, Lịch sử, Khoa học, Tâm lý,...)
+  - Vị trí: ký tự đầu = chữ cái viết tắt thể loại, số = kệ (mỗi kệ chứa tối đa 15 quyển).
 
-  Chỉ trả về 1 từ: tên thể loại.
+  Trả về JSON hợp lệ:
+  {"category": "...", "position": "..."}
   `;
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: prompt
-  });
-  const text = response.response.candidates[0].content.parts[0].text.trim();
-  return text || "Chưa rõ";
-}
 
-// ===== Helper: tìm vị trí dựa vào category =====
-async function findPosition(category) {
-  // Lấy prefix
-  const result = await pool.query("SELECT prefix FROM categories WHERE name=$1", [category]);
-  if (result.rows.length === 0) return "?";
-  const prefix = result.rows[0].prefix;
-
-  // Kiểm tra kệ đã đầy chưa (15 quyển/kệ)
-  let shelf = 1;
-  while (true) {
-    const position = `${prefix}${shelf}`;
-    const count = await pool.query("SELECT COUNT(*) FROM books WHERE position=$1", [position]);
-    if (parseInt(count.rows[0].count) < 15) {
-      return position;
-    }
-    shelf++;
+  const response = await model.generateContent(prompt);
+  try {
+    return JSON.parse(response.response.text());
+  } catch {
+    return { category: "Chưa rõ", position: "?" };
   }
 }
 
@@ -121,8 +82,8 @@ app.post("/chat", async (req, res) => {
         const bookName = match[1].trim();
         const author = match[2].trim();
 
-        const category = await inferCategory(bookName, author);
-        const position = await findPosition(category);
+        // Gemini suy luận thể loại + vị trí
+        const { category, position } = await inferCategoryAndPosition(bookName, author);
 
         await pool.query(
           "INSERT INTO books (name, author, category, position) VALUES ($1,$2,$3,$4)",
@@ -132,25 +93,6 @@ app.post("/chat", async (req, res) => {
         reply = `✅ Đã thêm sách: "${bookName}" (${author})\nThể loại: ${category}\nVị trí: ${position}`;
       } else {
         reply = "❌ Sai cú pháp. Hãy dùng: `add book: bn: Tên sách; at: Tác giả`";
-      }
-    }
-
-    // Nếu user muốn cập nhật thể loại
-    else if (message.toLowerCase().includes("thể loại là")) {
-      const match = message.match(/sách\s+"(.+)"|(.+)\s+thể loại là\s+(.+)/i);
-      if (match) {
-        const bookName = match[1] || match[2];
-        const newCategory = match[3].trim();
-        const newPosition = await findPosition(newCategory);
-
-        await pool.query(
-          "UPDATE books SET category=$1, position=$2 WHERE name ILIKE $3",
-          [newCategory, newPosition, `%${bookName}%`]
-        );
-
-        reply = `🔄 Đã cập nhật thể loại cho "${bookName}" thành ${newCategory}, vị trí: ${newPosition}`;
-      } else {
-        reply = "❌ Không hiểu sách nào bạn muốn cập nhật.";
       }
     }
 
@@ -172,8 +114,40 @@ app.post("/chat", async (req, res) => {
       }
     }
 
-    // Nếu chỉ chat
+    // Nếu user muốn tìm sách (Gemini suy luận nhu cầu)
+    else if (message.toLowerCase().includes("tìm sách") || message.toLowerCase().includes("find book")) {
+      const result = await pool.query("SELECT * FROM books LIMIT 50");
+
+      if (result.rowCount === 0) {
+        reply = "📭 Hiện chưa có sách nào trong thư viện.";
+      } else {
+        const bookList = result.rows.map(
+          b => `- "${b.name}" (${b.author}) | ${b.category} | Vị trí: ${b.position}`
+        ).join("\n");
+
+        const prompt = `
+        Người dùng đang cần: "${message}"
+
+        Đây là danh sách sách trong thư viện:
+        ${bookList}
+
+        Hãy chọn ra 1-3 cuốn phù hợp nhất với nhu cầu trên.
+        Trả về gọn gàng như sau:
+        Tên: ...
+        Tác giả: ...
+        Thể loại: ...
+        Vị trí: ...
+        Giải thích: ...
+        `;
+
+        const response = await model.generateContent(prompt);
+        reply = response.response.text().trim() || "Không tìm thấy sách phù hợp.";
+      }
+    }
+
+    // Nếu user chỉ chat bình thường
     else {
+      // Lấy hội thoại gần nhất
       const history = await pool.query(
         "SELECT role, message FROM conversations ORDER BY created_at DESC LIMIT 10"
       );
@@ -187,17 +161,13 @@ app.post("/chat", async (req, res) => {
       ${historyText}
 
       Nhiệm vụ:
-      - Nếu người dùng cần sách, hãy chọn từ DB.
-      - Trả về: Tên, Tác giả, Thể loại, Vị trí.
-      - Nếu chỉ trò chuyện, trả lời tự nhiên.
+      - Nếu người dùng cần sách, hãy chọn 1 quyển trong DB.
+      - Hiển thị: Tên, Tác giả, Thể loại, Vị trí + recap ngắn.
+      - Nếu chỉ trò chuyện, hãy trả lời tự nhiên.
       `;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt
-      });
-
-      reply = response.response.candidates[0].content.parts[0].text || "Không có phản hồi.";
+      const response = await model.generateContent(prompt);
+      reply = response.response.text().trim() || "Không có phản hồi.";
     }
 
     // Lưu trả lời
@@ -210,19 +180,8 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// ===== Route trả về index.html =====
-import { readFile } from "fs/promises";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-app.get("/", async (req, res) => {
-  const html = await readFile(path.join(__dirname, "index.html"), "utf-8");
-  res.send(html);
-});
-
+// ===== Khởi động server =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Server chạy trên cổng ${PORT}`);
+  console.log(`✅ Server đang chạy trên cổng ${PORT}`);
 });
