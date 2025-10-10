@@ -3,22 +3,27 @@ import bodyParser from "body-parser";
 import pkg from "pg";
 import dotenv from "dotenv";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import path from "path";
+import { fileURLToPath } from "url";
 
 dotenv.config();
 
 const app = express();
 app.use(bodyParser.json());
 
-// PostgreSQL setup
+// ===== Đường dẫn hiện tại =====
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// ===== PostgreSQL setup =====
 const { Pool } = pkg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Gemini setup
-const ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" });
+// ===== Gemini setup =====
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // ===== Tạo bảng nếu chưa có =====
 async function initTables() {
@@ -44,19 +49,21 @@ async function initTables() {
 }
 initTables();
 
-// ===== Helper: nhờ Gemini suy luận thể loại & vị trí =====
+// ===== Helper: suy luận thể loại + vị trí từ Gemini =====
 async function inferCategoryAndPosition(bookName, author) {
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
   const prompt = `
   Bạn là quản thủ thư viện.
   Với sách "${bookName}" của tác giả "${author}", hãy đoán:
   - Thể loại (ví dụ: Văn học, Lịch sử, Khoa học, Tâm lý,...)
   - Vị trí: ký tự đầu = chữ cái viết tắt thể loại, số = kệ (mỗi kệ chứa tối đa 15 quyển).
 
-  Trả về JSON hợp lệ:
+  Trả về JSON:
   {"category": "...", "position": "..."}
   `;
 
   const response = await model.generateContent(prompt);
+
   try {
     return JSON.parse(response.response.text());
   } catch {
@@ -64,7 +71,12 @@ async function inferCategoryAndPosition(bookName, author) {
   }
 }
 
-// ===== API Chat chính =====
+// ===== Serve index.html =====
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
+
+// ===== API Chat =====
 app.post("/chat", async (req, res) => {
   const { message } = req.body;
   if (!message) return res.status(400).json({ error: "Thiếu 'message'" });
@@ -75,14 +87,13 @@ app.post("/chat", async (req, res) => {
 
     let reply = "";
 
-    // Nếu user muốn thêm sách
+    // ===== Add book =====
     if (message.toLowerCase().startsWith("add book")) {
       const match = message.match(/bn:\s*([^;]+);\s*at:\s*(.+)/i);
       if (match) {
         const bookName = match[1].trim();
         const author = match[2].trim();
 
-        // Gemini suy luận thể loại + vị trí
         const { category, position } = await inferCategoryAndPosition(bookName, author);
 
         await pool.query(
@@ -96,7 +107,7 @@ app.post("/chat", async (req, res) => {
       }
     }
 
-    // Nếu user muốn xoá sách
+    // ===== Delete book =====
     else if (message.toLowerCase().startsWith("delete book")) {
       const match = message.match(/bn:\s*([^;]+);\s*at:\s*(.+)/i);
       if (match) {
@@ -114,63 +125,36 @@ app.post("/chat", async (req, res) => {
       }
     }
 
-    // Nếu user muốn tìm sách (Gemini suy luận nhu cầu)
-    else if (message.toLowerCase().includes("tìm sách") || message.toLowerCase().includes("find book")) {
-      const result = await pool.query("SELECT * FROM books LIMIT 50");
+    // ===== Tìm sách trong DB bằng Gemini =====
+    else {
+      // Lấy toàn bộ sách trong DB
+      const result = await pool.query("SELECT name, author, category, position FROM books");
+      const books = result.rows;
 
-      if (result.rowCount === 0) {
-        reply = "📭 Hiện chưa có sách nào trong thư viện.";
+      if (books.length === 0) {
+        reply = "📭 Chưa có sách nào trong thư viện.";
       } else {
-        const bookList = result.rows.map(
-          b => `- "${b.name}" (${b.author}) | ${b.category} | Vị trí: ${b.position}`
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const bookList = books.map(b =>
+          `Tên: ${b.name}, Tác giả: ${b.author}, Thể loại: ${b.category}, Vị trí: ${b.position}`
         ).join("\n");
 
         const prompt = `
-        Người dùng đang cần: "${message}"
+        Người dùng hỏi: "${message}"
 
         Đây là danh sách sách trong thư viện:
         ${bookList}
 
-        Hãy chọn ra 1-3 cuốn phù hợp nhất với nhu cầu trên.
-        Trả về gọn gàng như sau:
-        Tên: ...
-        Tác giả: ...
-        Thể loại: ...
-        Vị trí: ...
-        Giải thích: ...
+        Hãy chọn sách phù hợp nhất và trả lời tự nhiên (bao gồm Tên, Tác giả, Thể loại, Vị trí).
+        Nếu không có sách phù hợp, hãy gợi ý chung chung.
         `;
 
         const response = await model.generateContent(prompt);
-        reply = response.response.text().trim() || "Không tìm thấy sách phù hợp.";
+        reply = response.response.text() || "🤔 Tôi chưa nghĩ ra câu trả lời.";
       }
     }
 
-    // Nếu user chỉ chat bình thường
-    else {
-      // Lấy hội thoại gần nhất
-      const history = await pool.query(
-        "SELECT role, message FROM conversations ORDER BY created_at DESC LIMIT 10"
-      );
-
-      const historyText = history.rows.reverse()
-        .map(h => `${h.role === "user" ? "Người dùng" : "Trợ lý"}: ${h.message}`)
-        .join("\n");
-
-      const prompt = `
-      Đây là hội thoại:
-      ${historyText}
-
-      Nhiệm vụ:
-      - Nếu người dùng cần sách, hãy chọn 1 quyển trong DB.
-      - Hiển thị: Tên, Tác giả, Thể loại, Vị trí + recap ngắn.
-      - Nếu chỉ trò chuyện, hãy trả lời tự nhiên.
-      `;
-
-      const response = await model.generateContent(prompt);
-      reply = response.response.text().trim() || "Không có phản hồi.";
-    }
-
-    // Lưu trả lời
+    // Lưu assistant reply
     await pool.query("INSERT INTO conversations (role, message) VALUES ($1,$2)", ["assistant", reply]);
 
     res.json({ reply });
@@ -180,20 +164,8 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// ===== Khởi động server + phục vụ index.html =====
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Route mặc định: trả về file index.html trong cùng thư mục với server.js
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
-});
-
+// ===== Start server =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Server đang chạy tại http://localhost:${PORT}`);
+  console.log(`✅ Server đang chạy trên cổng ${PORT}`);
 });
-
