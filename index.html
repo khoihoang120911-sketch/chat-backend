@@ -6,93 +6,137 @@
   <style>
     body {
       font-family: Arial, sans-serif;
-      background: #f4f6f9;
+      background: #f4f7fa;
+      margin: 0;
+      padding: 0;
       display: flex;
       justify-content: center;
-      align-items: flex-start;
-      padding: 40px;
-      margin: 0;
+      align-items: center;
+      height: 100vh;
     }
+
     .container {
-      width: 100%;
-      max-width: 600px;
+      width: 420px;
       background: white;
-      border-radius: 12px;
       padding: 20px;
-      box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      display: flex;
+      flex-direction: column;
     }
+
     h1 {
       text-align: center;
       color: #333;
+      font-size: 22px;
+      margin-bottom: 10px;
     }
-    textarea {
-      width: 100%;
-      padding: 12px;
+
+    #chat-box {
+      flex: 1;
+      border: 1px solid #ddd;
       border-radius: 8px;
-      border: 1px solid #ccc;
-      resize: none;
-      margin-top: 10px;
+      padding: 10px;
+      margin-bottom: 10px;
+      height: 300px;
+      overflow-y: auto;
+      background: #fafafa;
       font-size: 14px;
     }
+
+    .message {
+      margin: 6px 0;
+      padding: 8px 12px;
+      border-radius: 8px;
+      max-width: 80%;
+      line-height: 1.4;
+      white-space: pre-line;
+    }
+
+    .user {
+      background: #d1e7ff;
+      align-self: flex-end;
+      text-align: right;
+    }
+
+    .bot {
+      background: #e9ecef;
+      align-self: flex-start;
+    }
+
+    .input-area {
+      display: flex;
+      gap: 8px;
+    }
+
+    input {
+      flex: 1;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+
     button {
-      margin-top: 15px;
-      width: 100%;
-      padding: 12px;
-      background: #4CAF50;
+      background: #28a745;
       color: white;
       border: none;
+      padding: 10px 16px;
       border-radius: 8px;
-      font-size: 16px;
       cursor: pointer;
+      font-size: 14px;
     }
+
     button:hover {
-      background: #45a049;
-    }
-    .card {
-      margin-top: 20px;
-      padding: 20px;
-      border-radius: 10px;
-      background: #fafafa;
-      border-left: 6px solid #4CAF50;
-      line-height: 1.6;
-    }
-    .card strong {
-      color: #333;
+      background: #218838;
     }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>📚 Trợ lý tìm sách</h1>
-    <textarea id="message" rows="3" placeholder="Nhập tình trạng hoặc mong muốn của bạn..."></textarea>
-    <button onclick="sendMessage()">Tìm sách phù hợp</button>
-    <div id="reply" class="card" style="display:none;"></div>
+    <div id="chat-box"></div>
+    <div class="input-area">
+      <input type="text" id="message" placeholder="Nhập yêu cầu, thêm hoặc xóa sách...">
+      <button onclick="sendMessage()">Gửi</button>
+    </div>
   </div>
 
   <script>
-    async function sendMessage() {
-      const message = document.getElementById("message").value.trim();
-      if (!message) {
-        alert("Vui lòng nhập tình trạng hoặc mong muốn!");
-        return;
-      }
+    const chatBox = document.getElementById("chat-box");
+    const input = document.getElementById("message");
 
-      const replyDiv = document.getElementById("reply");
-      replyDiv.style.display = "block";
-      replyDiv.innerHTML = "⏳ Đang tìm sách phù hợp...";
+    function addMessage(text, sender) {
+      const msg = document.createElement("div");
+      msg.classList.add("message", sender);
+      msg.innerText = text;
+      chatBox.appendChild(msg);
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const text = input.value.trim();
+      if (!text) return;
+
+      addMessage(text, "user");
+      input.value = "";
 
       try {
         const res = await fetch("/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message })
+          body: JSON.stringify({ message: text })
         });
         const data = await res.json();
-        replyDiv.innerHTML = data.reply;
-      } catch (err) {
-        replyDiv.innerHTML = "❌ Lỗi khi kết nối server!";
+        addMessage(data.reply, "bot");
+      } catch (e) {
+        addMessage("❌ Lỗi kết nối server.", "bot");
       }
     }
+
+    input.addEventListener("keydown", e => {
+      if (e.key === "Enter") sendMessage();
+    });
   </script>
 </body>
 </html>
