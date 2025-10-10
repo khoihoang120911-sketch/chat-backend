@@ -52,26 +52,46 @@ await initTables();
 // ===== Seed dữ liệu lần đầu =====
 import("./seedBooks.js");
 
-// ===== Helper: suy luận thể loại + vị trí từ Gemini =====
-async function inferCategoryAndPosition(bookName, author) {
+// ===== Helper: Gemini suy luận category =====
+async function inferCategory(bookName, author) {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
   const prompt = `
-Bạn là quản thủ thư viện. 
-Nhiệm vụ: Suy luận thể loại & vị trí kệ sách cho cuốn:
-- Tên: "${bookName}"
+Bạn là quản thủ thư viện.
+Hãy xác định thể loại từ thông tin sau:
+- Tên sách: "${bookName}"
 - Tác giả: "${author}"
 
-Trả về JSON:
-{"category": "...", "position": "..."}
+Yêu cầu: chỉ trả về JSON duy nhất:
+{"category": "Tên thể loại"}
+Ví dụ: Văn học, Lịch sử, Khoa học, Kinh tế, Tâm lý, Triết học, ...
 `;
 
   const response = await model.generateContent(prompt);
   try {
-    return JSON.parse(response.response.text());
+    return JSON.parse(response.response.text()).category || "Chưa rõ";
   } catch {
-    return { category: "Chưa rõ", position: "?" };
+    return "Chưa rõ";
   }
+}
+
+// ===== Helper: Tính toán vị trí (position) =====
+async function calculatePosition(category) {
+  if (!category || category === "Chưa rõ") return "?";
+
+  const prefix = category[0].toUpperCase(); // chữ cái đầu của thể loại
+
+  // Đếm số sách hiện có trong thể loại này
+  const countRes = await pool.query(
+    "SELECT COUNT(*) FROM books WHERE category = $1",
+    [category]
+  );
+  const count = parseInt(countRes.rows[0].count, 10);
+
+  // Tính số kệ = (số sách hiện có / 15) + 1
+  const shelfNumber = Math.floor(count / 15) + 1;
+
+  return `${prefix}${shelfNumber}`;
 }
 
 // ===== Serve index.html =====
@@ -96,8 +116,13 @@ app.post("/chat", async (req, res) => {
         const bookName = match[1].trim();
         const author = match[2].trim();
 
-        const { category, position } = await inferCategoryAndPosition(bookName, author);
+        // 1. Gemini suy luận thể loại
+        const category = await inferCategory(bookName, author);
 
+        // 2. Server tự tính vị trí dựa trên số lượng hiện tại
+        const position = await calculatePosition(category);
+
+        // 3. Lưu DB
         await pool.query(
           "INSERT INTO books (name, author, category, position) VALUES ($1,$2,$3,$4)",
           [bookName, author, category, position]
