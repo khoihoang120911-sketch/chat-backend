@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "seed": "node seedBooks.js",
-    "clear": "node clearDB.js"
+    "clear": "node clearDB.js",
     "reset": "node resetDB.js"
   },
   "dependencies": {
