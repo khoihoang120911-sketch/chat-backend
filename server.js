@@ -180,8 +180,20 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// ===== Khởi động server =====
+// ===== Khởi động server + phục vụ index.html =====
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Route mặc định: trả về file index.html trong cùng thư mục với server.js
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Server đang chạy trên cổng ${PORT}`);
+  console.log(`✅ Server đang chạy tại http://localhost:${PORT}`);
 });
+
