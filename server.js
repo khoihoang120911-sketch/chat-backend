@@ -75,35 +75,72 @@ async function assignPosition(category) {
 }
 
 async function inferCategory(bookName, author) {
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const model = genAI.getGenerativeModel({
+    model: "gemini-2.5-flash",
+    tools: [{ type: "google_search_retrieval" }] // Cho phép Gemini tra web khi cần
+  });
+
+  // Danh mục cố định của thư viện
+  const allowedCategories = [
+    "Văn học",
+    "Lịch sử",
+    "Công nghệ",
+    "Khoa học",
+    "Tâm lý",
+    "Giáo dục",
+    "Kinh tế",
+    "Văn hoá",
+    "Chính trị",
+    "Thiếu nhi",
+    "Tôn giáo",
+    "Xã hội"
+  ];
 
   const prompt = `
-Bạn là quản thủ thư viện thông minh.
-Dựa trên tên sách và tác giả, xác định THỂ LOẠI phù hợp nhất.
+Bạn là thủ thư thông minh của thư viện.
+Dựa vào thông tin có thể tìm thấy trên web nếu cần, hãy xác định thể loại phù hợp nhất cho cuốn sách.
+Phải chọn một trong các thể loại sau: ${allowedCategories.join(", ")}.
 
-Tên: "${bookName}"
+Tên sách: "${bookName}"
 Tác giả: "${author}"
 
-Trả về JSON duy nhất: {"category": "Thể loại"}
+Trả về đúng một JSON duy nhất: {"category": "Thể loại từ danh sách trên"}
+Nếu không chắc chắn, trả {"category": "Chưa rõ"}.
 `;
 
   try {
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: prompt }] }]
     });
+
     const raw = result.response.text();
     const parsed = extractFirstJson(raw);
-    if (parsed && parsed.category) return parsed.category;
 
+    // Nếu Gemini trả về hợp lệ và khớp danh sách
+    if (parsed && parsed.category) {
+      const found = allowedCategories.find(c =>
+        parsed.category.toLowerCase().includes(c.toLowerCase())
+      );
+      if (found) return found;
+      if (parsed.category.toLowerCase().includes("chưa rõ")) return "Chưa rõ";
+    }
+
+    // Nếu không có hoặc không hợp lệ → fallback tự suy luận
     const titleLower = bookName.toLowerCase();
-    if (/(python|program|code|data|ai|machine)/i.test(titleLower)) return "Công nghệ";
-    if (/(tiểu thuyết|truyện|novel|poem|du ký|ký)/i.test(titleLower)) return "Văn học";
-    if (/(lịch sử|history|war|chiến tranh)/i.test(titleLower)) return "Lịch sử";
+    if (/(python|program|code|data|ai|machine|kỹ thuật|công nghệ)/i.test(titleLower)) return "Công nghệ";
+    if (/(lịch sử|history|war|chiến tranh|đặng thùy trâm|trần hưng đạo)/i.test(titleLower)) return "Lịch sử";
+    if (/(tiểu thuyết|truyện|novel|ký|thơ|văn học|poem|fiction)/i.test(titleLower)) return "Văn học";
+    if (/(tâm lý|psychology|cảm xúc|hành vi)/i.test(titleLower)) return "Tâm lý";
+    if (/(giáo dục|education|học tập)/i.test(titleLower)) return "Giáo dục";
+    if (/(kinh tế|economy|business|thương mại)/i.test(titleLower)) return "Kinh tế";
+    if (/(chính trị|politic|xã hội|culture|văn hoá|religion|tôn giáo|society)/i.test(titleLower)) return "Xã hội";
     return "Chưa rõ";
-  } catch {
+  } catch (e) {
+    console.error("⚠️ inferCategory error:", e);
     return "Chưa rõ";
   }
 }
+
 
 async function askGeminiToChoose(message, books, conversationContext = "") {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
