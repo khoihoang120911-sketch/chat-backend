@@ -1,4 +1,5 @@
-// server.js (library + recap + web search, no freeform chat)
+// server.js (đã bỏ phần chat tự do với Gemini)
+
 import express from "express";
 import bodyParser from "body-parser";
 import pkg from "pg";
@@ -6,14 +7,13 @@ import dotenv from "dotenv";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import path from "path";
 import { fileURLToPath } from "url";
-import { web } from "duckduckgo-search-api"; // Giả lập tra web (chúng ta có thể thay bằng API thật nếu deploy)
 
 dotenv.config();
 
 const app = express();
 app.use(bodyParser.json());
 
-// ===== Path helpers =====
+// ===== path helpers =====
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -27,7 +27,7 @@ const pool = new Pool({
 // ===== Gemini setup =====
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// ===== Init tables =====
+// ===== init tables =====
 async function initTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS books (
@@ -51,7 +51,10 @@ async function initTables() {
 }
 await initTables();
 
-// ===== Helpers =====
+// seed nếu có
+import("./seedBooks.js").catch(() => {});
+
+// ===== helpers =====
 function extractFirstJson(text) {
   if (!text || typeof text !== "string") return null;
   const match = text.match(/\{[\s\S]*\}/);
@@ -74,28 +77,20 @@ async function assignPosition(category) {
 
 async function inferCategory(bookName, author) {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
   const prompt = `
-Bạn là quản thủ thư viện thông minh.
-Dựa trên tên sách và tác giả, hãy xác định THỂ LOẠI phù hợp nhất.
-
-Tên: "${bookName}"
-Tác giả: "${author}"
-
-Trả về JSON duy nhất: {"category": "Thể loại"}
-`;
-
+  Bạn là quản thủ thư viện thông minh. Dựa trên tên sách và tác giả, xác định THỂ LOẠI phù hợp nhất.
+  Tên: "${bookName}"
+  Tác giả: "${author}"
+  Trả về JSON duy nhất: {"category": "Thể loại"}
+  `;
   try {
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
+    const result = await model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
     const raw = result.response.text();
     const parsed = extractFirstJson(raw);
     if (parsed && parsed.category) return parsed.category;
-
     const titleLower = bookName.toLowerCase();
     if (/(python|program|code|data|ai|machine)/i.test(titleLower)) return "Công nghệ";
-    if (/(tiểu thuyết|truyện|novel|poem|ký)/i.test(titleLower)) return "Văn học";
+    if (/(tiểu thuyết|truyện|novel|poem|du ký|ký)/i.test(titleLower)) return "Văn học";
     if (/(lịch sử|history|war|chiến tranh)/i.test(titleLower)) return "Lịch sử";
     return "Chưa rõ";
   } catch {
@@ -105,63 +100,42 @@ Trả về JSON duy nhất: {"category": "Thể loại"}
 
 async function askGeminiToChoose(message, books, conversationContext = "") {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
   const prompt = `
-Bạn là trợ lý thư viện. Dựa trên đoạn hội thoại gần đây:
-${conversationContext}
-
-Người dùng vừa nói: "${message}"
-
-Danh sách sách: ${JSON.stringify(books, null, 2)}
-
-Trả về JSON duy nhất:
-{
- "title": "Tên sách EXACT từ DB",
- "author": "Tác giả EXACT từ DB",
- "category": "Thể loại EXACT từ DB",
- "location": "Vị trí EXACT từ DB",
- "reason": "Giải thích ngắn (1-2 câu)"
-}
-`;
-
+  Bạn là trợ lý thư viện.
+  Dựa trên đoạn hội thoại gần đây: ${conversationContext}
+  Người dùng vừa nói: "${message}"
+  Danh sách sách: ${JSON.stringify(books, null, 2)}
+  Trả về JSON duy nhất:
+  {
+    "title": "Tên sách EXACT từ DB",
+    "author": "Tác giả EXACT từ DB",
+    "category": "Thể loại EXACT từ DB",
+    "location": "Vị trí EXACT từ DB",
+    "reason": "Giải thích ngắn (1-2 câu)"
+  }
+  `;
   try {
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
+    const result = await model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
     const raw = result.response.text();
-    const parsed = extractFirstJson(raw);
-    return parsed;
-  } catch (e) {
-    console.error("⚠️ askGeminiToChoose error:", e);
+    return extractFirstJson(raw);
+  } catch {
     return null;
   }
 }
 
-async function askGeminiForRecap(bookTitle, author, webSummary = "") {
+async function askGeminiForRecap(bookTitle, author) {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
   const prompt = `
-Bạn là chuyên gia tóm tắt sách.
-Hãy viết tóm tắt ngắn (100-200 từ) cho cuốn:
-- Tên: "${bookTitle}"
-- Tác giả: "${author}"
-
-Nếu bạn có thêm thông tin tra cứu web bên dưới, hãy dùng để cải thiện tóm tắt:
-${webSummary ? "\nThông tin web:\n" + webSummary : ""}
-
-Trả về JSON duy nhất:
-{"title":"${bookTitle}", "author":"${author}", "recap":"Tóm tắt ngắn gọn không quá 200 từ"}
-`;
-
+  Bạn là một trợ lý tóm tắt sách chuyên nghiệp.
+  Tóm tắt ngắn (100-200 từ) nội dung, chủ đề và đối tượng người đọc của cuốn:
+  - Tên: "${bookTitle}"
+  - Tác giả: "${author}"
+  Trả về JSON duy nhất: {"title":"${bookTitle}", "author":"${author}", "recap":"Tóm tắt ngắn gọn không quá 200 từ"}
+  `;
   try {
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-    const raw = result.response.text();
-    const parsed = extractFirstJson(raw);
-    return parsed;
-  } catch (e) {
-    console.error("⚠️ askGeminiForRecap error:", e);
+    const result = await model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
+    return extractFirstJson(result.response.text());
+  } catch {
     return null;
   }
 }
@@ -206,11 +180,13 @@ app.post("/chat", async (req, res) => {
         const bookName = match[1].trim();
         const author = match[2].trim();
         const result = await pool.query("DELETE FROM books WHERE name=$1 AND author=$2 RETURNING *", [bookName, author]);
-        reply = result.rowCount ? `🗑️ Đã xoá sách "${bookName}" của ${author}` : `⚠️ Không tìm thấy sách "${bookName}" của ${author}`;
+        reply = result.rowCount
+          ? `🗑️ Đã xoá sách "${bookName}" của ${author}`
+          : `⚠️ Không tìm thấy sách "${bookName}" của ${author}`;
       }
     }
 
-    // VỊ TRÍ
+    // TRA CỨU VỊ TRÍ
     else if (/\bvị trí\s+[A-Z]\d+\b/i.test(lower)) {
       const m = lower.match(/\bvị trí\s+([A-Z]\d+)\b/i);
       const pos = m ? m[1].toUpperCase() : null;
@@ -223,47 +199,35 @@ app.post("/chat", async (req, res) => {
       }
     }
 
-    // RECAP
+    // TÓM TẮT SÁCH
     else if (/\b(tóm tắt|recap|summary)\b/i.test(lower)) {
       let guess = message.replace(/["'‘’“”]/g, "").toLowerCase();
       guess = guess.replace(/\b(recape?|tóm tắt|summary|giúp|cuốn|sách|hãy|nội dung|cho tôi|về|đi)\b/g, "").trim();
-
       let target = null;
       const q = await pool.query(
-        `SELECT name, author, category, position FROM books 
-         WHERE LOWER(name) LIKE $1 OR LOWER(author) LIKE $1 LIMIT 1`,
+        `SELECT name, author, category, position FROM books WHERE LOWER(name) LIKE $1 OR LOWER(author) LIKE $1 LIMIT 1`,
         [`%${guess}%`]
       );
       if (q.rows.length) target = q.rows[0];
-
       if (!target) {
         const all = await pool.query("SELECT name, author, category, position FROM books");
         for (const b of all.rows) {
-          if (message.toLowerCase().includes(b.name.toLowerCase())) { target = b; break; }
+          if (message.toLowerCase().includes(b.name.toLowerCase())) {
+            target = b;
+            break;
+          }
         }
       }
-
       if (!target) reply = "⚠️ Mình chưa rõ bạn muốn tóm tắt quyển nào. Hãy nói tên sách cụ thể nhé.";
       else {
-        // tra web nếu có thể
-        let webInfo = "";
-        try {
-          const results = await web(`${target.name} ${target.author} book summary`);
-          if (results && results.length) {
-            webInfo = results.slice(0, 3).map(r => `- ${r.title}: ${r.snippet}`).join("\n");
-          }
-        } catch (err) {
-          console.warn("⚠️ Web search error:", err.message);
-        }
-
-        const recap = await askGeminiForRecap(target.name, target.author, webInfo);
+        const recap = await askGeminiForRecap(target.name, target.author);
         reply = recap?.recap
           ? `📖 "${target.name}" (${target.author})\nThể loại: ${target.category || "Chưa rõ"}, Vị trí: ${target.position}\n\n📝 ${recap.recap}`
-          : `⚠️ Không tóm tắt được lúc này.`;
+          : "⚠️ Không tóm tắt được lúc này.";
       }
     }
 
-    // SEARCH
+    // TRUY VẤN SÁCH / GỢI Ý
     else {
       const { rows: books } = await pool.query("SELECT name, author, category, position FROM books");
       const histRes = await pool.query("SELECT role, message FROM conversations ORDER BY id DESC LIMIT 6");
@@ -276,19 +240,19 @@ app.post("/chat", async (req, res) => {
         (b.category && b.category.toLowerCase().includes(keywords))
       );
 
-      if (!directMatch.length) {
-        reply = "⚠️ Không tìm thấy sách phù hợp trong thư viện.";
-      } else if (directMatch.length === 1) {
-        const chosen = directMatch[0];
-        reply = `📚 Gợi ý: "${chosen.name}" (${chosen.author})\nThể loại: ${chosen.category || "Chưa rõ"}, Vị trí: ${chosen.position}`;
-      } else {
+      if (directMatch.length === 1) {
+        const b = directMatch[0];
+        reply = `📚 "${b.name}" (${b.author})\nThể loại: ${b.category || "Chưa rõ"}, Vị trí: ${b.position}`;
+      } else if (directMatch.length > 1) {
         const pick = await askGeminiToChoose(message, directMatch, recent);
         if (pick && pick.title) {
           const rec = directMatch.find(b => b.name === pick.title) || directMatch[0];
           reply = `📚 Gợi ý: "${rec.name}" (${rec.author})\nThể loại: ${rec.category || "Chưa rõ"}, Vị trí: ${rec.position}\n💡 ${pick.reason || ""}`;
         } else {
-          reply = "⚠️ Mình chưa chắc bạn đang tìm cuốn nào, hãy nói rõ hơn nhé.";
+          reply = "⚠️ Không rõ bạn muốn hỏi quyển nào. Vui lòng nói rõ hơn.";
         }
+      } else {
+        reply = "⚠️ Không tìm thấy sách phù hợp trong cơ sở dữ liệu.";
       }
     }
 
