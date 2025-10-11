@@ -1,4 +1,4 @@
-// server.js (final ready)
+// server.js (final: natural chat + recap fix + full context)
 import express from "express";
 import bodyParser from "body-parser";
 import pkg from "pg";
@@ -8,21 +8,25 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 dotenv.config();
+
 const app = express();
 app.use(bodyParser.json());
 
+// ===== path helpers =====
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const { Pool } = pkg;
 
+// ===== Postgres setup =====
+const { Pool } = pkg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: { rejectUnauthorized: false }
 });
 
+// ===== Gemini setup =====
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// === init tables ===
+// ===== init tables =====
 async function initTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS books (
@@ -32,225 +36,268 @@ async function initTables() {
       category TEXT,
       position TEXT,
       created_at TIMESTAMP DEFAULT NOW()
-    );
+    )
   `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS conversations (
       id SERIAL PRIMARY KEY,
       role TEXT NOT NULL,
       message TEXT NOT NULL,
       created_at TIMESTAMP DEFAULT NOW()
-    );
+    )
   `);
 }
 await initTables();
-import("./seedBooks.js").catch(() => {});
 
-// === helpers ===
+// seed if needed (keeps behavior you used before)
+import("./seedBooks.js").catch(()=>{/* ignore if missing */});
+
+// ===== helpers =====
 function extractFirstJson(text) {
   if (!text || typeof text !== "string") return null;
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) return null;
-  try { return JSON.parse(match[0]); } catch { return null; }
-}
-
-const VALID_CATEGORIES = [
-  "Công nghệ", "Văn học", "Lịch sử", "Kinh tế",
-  "Tâm lý", "Giáo dục", "Chính trị", "Chưa rõ"
-];
-
-function normalizeCategory(input) {
-  if (!input) return "Chưa rõ";
-  const t = input.toLowerCase();
-  if (/(tech|code|ai|data|lập trình|máy tính)/.test(t)) return "Công nghệ";
-  if (/(truyện|tiểu thuyết|văn học|ký|novel)/.test(t)) return "Văn học";
-  if (/(lịch sử|chiến tranh|history|war)/.test(t)) return "Lịch sử";
-  if (/(kinh tế|tài chính|business|economy)/.test(t)) return "Kinh tế";
-  if (/(tâm lý|psychology)/.test(t)) return "Tâm lý";
-  if (/(giáo dục|education)/.test(t)) return "Giáo dục";
-  if (/(chính trị|politic)/.test(t)) return "Chính trị";
-  return "Chưa rõ";
+  try {
+    return JSON.parse(match[0]);
+  } catch (e) {
+    return null;
+  }
 }
 
 async function assignPosition(category) {
-  const c = normalizeCategory(category);
-  const letter = c[0].toUpperCase();
-  const res = await pool.query("SELECT COUNT(*) FROM books WHERE category=$1", [c]);
+  if (!category) return "X?";
+  const letter = category.trim()[0]?.toUpperCase() || "X";
+  const res = await pool.query("SELECT COUNT(*) FROM books WHERE category = $1", [category]);
   const count = parseInt(res.rows[0].count || "0", 10);
   const shelf = Math.floor(count / 15) + 1;
   return `${letter}${shelf}`;
 }
 
-// === Gemini functions ===
-async function detectIntent(message) {
+async function inferCategory(bookName, author) {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-  const prompt = `
-Phân loại câu sau thành 1 loại duy nhất:
-- add_book
-- delete_book
-- ask_recap
-- search_book
-- recommend_book
-- smalltalk
-- other
-Trả về JSON {"intent":"..."}
-Câu: "${message}"
-`;
-  try {
-    const r = await model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
-    const raw = r.response.text();
-    return extractFirstJson(raw)?.intent || "other";
-  } catch (e) {
-    console.error("⚠️ detectIntent error:", e);
-    return "other";
-  }
-}
 
-async function inferCategory(name, author) {
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
   const prompt = `
-Chọn thể loại phù hợp nhất cho "${name}" (${author}) trong:
-${VALID_CATEGORIES.join(", ")}.
-Trả về JSON {"category":"..."}
+Bạn là quản thủ thư viện thông minh.
+Dựa trên tên sách và tác giả, xác định THỂ LOẠI phù hợp nhất.
+
+Tên: "${bookName}"
+Tác giả: "${author}"
+
+Trả về JSON duy nhất: {"category": "Thể loại"}
 `;
+
   try {
-    const r = await model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
-    return normalizeCategory(extractFirstJson(r.response.text())?.category);
+    const response = await model.generateContent(prompt);
+    const raw = response.response.text();
+    const parsed = extractFirstJson(raw);
+    if (parsed && parsed.category) return parsed.category;
+
+    const titleLower = bookName.toLowerCase();
+    if (/(python|program|code|data|ai|machine)/i.test(titleLower)) return "Công nghệ";
+    if (/(tiểu thuyết|truyện|novel|poem|du ký|ký)/i.test(titleLower)) return "Văn học";
+    if (/(lịch sử|history|war|chiến tranh)/i.test(titleLower)) return "Lịch sử";
+    return "Chưa rõ";
   } catch {
     return "Chưa rõ";
   }
 }
 
-async function askGeminiForRecap(name, author) {
+async function askGeminiToChoose(message, books, conversationContext = "") {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
   const prompt = `
-Tóm tắt ngắn (100–200 từ) nội dung, chủ đề và ý nghĩa của "${name}" (${author}).
-Trả về JSON {"recap":"..."}
+Bạn là trợ lý thư viện. Dựa trên đoạn hội thoại gần đây:
+${conversationContext}
+
+Người dùng vừa nói: "${message}"
+
+Danh sách sách: ${JSON.stringify(books, null, 2)}
+
+Trả về JSON duy nhất:
+{
+ "title": "Tên sách EXACT từ DB",
+ "author": "Tác giả EXACT từ DB",
+ "category": "Thể loại EXACT từ DB",
+ "location": "Vị trí EXACT từ DB",
+ "reason": "Giải thích ngắn (1-2 câu)"
+}
 `;
+
   try {
-    const r = await model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
-    return extractFirstJson(r.response.text())?.recap || null;
+    const response = await model.generateContent(prompt);
+    const raw = response.response.text();
+    const parsed = extractFirstJson(raw);
+    return parsed;
   } catch {
     return null;
   }
 }
 
-async function chatWithGeminiFreeform(message, context = "") {
-  const model = genAI.getGenerativeModel({
-    model: "gemini-2.5-flash",
-    tools: [{ type: "google_search_retrieval" }],
-  });
+async function askGeminiForRecap(bookTitle, author) {
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
   const prompt = `
-Bạn là trợ lý thân thiện, thông minh, có thể tra cứu thông tin web khi cần.
-Ngữ cảnh:
-${context}
-Người dùng: "${message}"
-Trả lời tự nhiên, bằng tiếng Việt.
+Bạn là một trợ lý tóm tắt sách chuyên nghiệp.
+Tóm tắt ngắn (100-200 từ) nội dung, chủ đề và đối tượng người đọc của cuốn:
+- Tên: "${bookTitle}"
+- Tác giả: "${author}"
+
+Trả về JSON duy nhất:
+{"title":"${bookTitle}", "author":"${author}", "recap":"Tóm tắt ngắn gọn không quá 200 từ"}
 `;
+
   try {
-    const r = await model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
-    return r.response.text() || "⚠️ Không có phản hồi.";
+    const response = await model.generateContent(prompt);
+    const raw = response.response.text();
+    const parsed = extractFirstJson(raw);
+    return parsed;
   } catch {
+    return null;
+  }
+}
+
+// NEW: chat tự nhiên với Gemini nếu không liên quan đến sách
+async function chatWithGeminiFreeform(message, context = "") {
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const prompt = `
+Bạn là trợ lý AI thân thiện, thông minh. 
+Ngữ cảnh trước đó:
+${context}
+
+Người dùng: "${message}"
+
+Hãy trả lời tự nhiên, ngắn gọn, dễ hiểu (bằng tiếng Việt).
+`;
+
+  try {
+    const response = await model.generateContent(prompt);
+    return response.response.text();
+  } catch (e) {
     return "⚠️ Xin lỗi, mình chưa thể phản hồi lúc này.";
   }
 }
 
-async function askGeminiToChoose(message, books) {
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-  const prompt = `
-Người dùng nói: "${message}"
-Danh sách sách:
-${books.map(b => `- ${b.name} (${b.author}) [${b.category}]`).join("\n")}
-Hãy chọn duy nhất 1 quyển phù hợp nhất (không bịa).
-Trả về JSON {"title":"Tên sách","reason":"Giải thích ngắn"}
-`;
-  try {
-    const r = await model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
-    return extractFirstJson(r.response.text());
-  } catch (e) {
-    console.error("⚠️ askGeminiToChoose error:", e);
-    return null;
-  }
-}
+// ===== Serve index.html =====
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
 
-// === ROUTES ===
-app.get("/", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
-
+// ===== /chat endpoint =====
 app.post("/chat", async (req, res) => {
   const { message } = req.body;
-  if (!message) return res.status(400).json({ error: "Thiếu message" });
+  if (!message) return res.status(400).json({ error: "Thiếu 'message'" });
+
   try {
-    await pool.query("INSERT INTO conversations (role,message) VALUES ($1,$2)", ["user", message]);
-    const { rows: books } = await pool.query("SELECT * FROM books");
-    const intent = await detectIntent(message);
-
-    const histRes = await pool.query("SELECT role,message FROM conversations ORDER BY id DESC LIMIT 6");
-    const recent = histRes.rows.reverse().map(r => `${r.role === "user" ? "Người dùng" : "Trợ lý"}: ${r.message}`).join("\n");
-
+    await pool.query("INSERT INTO conversations (role, message) VALUES ($1, $2)", ["user", message]);
     let reply = "";
+    const lower = message.toLowerCase();
 
     // ADD BOOK
-    if (intent === "add_book") {
-      const m = message.match(/bn:\s*([^;]+);\s*at:\s*(.+)/i);
-      if (!m) reply = "❌ Sai cú pháp. Dùng: add book: bn: Tên; at: Tác giả";
+    if (lower.startsWith("add book")) {
+      const match = message.match(/bn:\s*([^;]+);\s*at:\s*(.+)/i);
+      if (!match) reply = "❌ Sai cú pháp. Dùng: add book: bn: Tên sách; at: Tác giả";
       else {
-        const [_, name, author] = m;
-        const cat = await inferCategory(name.trim(), author.trim());
-        const pos = await assignPosition(cat);
-        await pool.query("INSERT INTO books (name,author,category,position) VALUES ($1,$2,$3,$4)", [name.trim(), author.trim(), cat, pos]);
-        reply = `✅ Đã thêm "${name.trim()}" (${author.trim()})\nThể loại: ${cat}\nVị trí: ${pos}`;
+        const bookName = match[1].trim();
+        const author = match[2].trim();
+        const category = await inferCategory(bookName, author);
+        const position = await assignPosition(category);
+        await pool.query(
+          "INSERT INTO books (name, author, category, position) VALUES ($1,$2,$3,$4)",
+          [bookName, author, category, position]
+        );
+        reply = `✅ Đã thêm sách: "${bookName}" (${author})\nThể loại: ${category}\nVị trí: ${position}`;
       }
     }
 
     // DELETE BOOK
-    else if (intent === "delete_book") {
-      const m = message.match(/bn:\s*([^;]+);\s*at:\s*(.+)/i);
-      if (!m) reply = "❌ Sai cú pháp. Dùng: delete book: bn: Tên; at: Tác giả";
+    else if (lower.startsWith("delete book")) {
+      const match = message.match(/bn:\s*([^;]+);\s*at:\s*(.+)/i);
+      if (!match) reply = "❌ Sai cú pháp. Dùng: delete book: bn: Tên sách; at: Tác giả";
       else {
-        const [_, name, author] = m;
-        const del = await pool.query("DELETE FROM books WHERE name=$1 AND author=$2 RETURNING *", [name.trim(), author.trim()]);
-        reply = del.rowCount ? `🗑️ Đã xoá "${name.trim()}" (${author.trim()})` : "⚠️ Không tìm thấy sách.";
+        const bookName = match[1].trim();
+        const author = match[2].trim();
+        const result = await pool.query("DELETE FROM books WHERE name=$1 AND author=$2 RETURNING *", [bookName, author]);
+        reply = result.rowCount ? `🗑️ Đã xoá sách "${bookName}" của ${author}` : `⚠️ Không tìm thấy sách "${bookName}" của ${author}`;
       }
     }
 
-    // ASK RECAP
-    else if (intent === "ask_recap") {
-      const text = message.toLowerCase();
-      const found = books.find(b => text.includes(b.name.toLowerCase()) || text.includes(b.author.toLowerCase()));
-      if (!found) reply = "⚠️ Không rõ bạn muốn tóm tắt sách nào.";
+    // VỊ TRÍ
+    else if (/\bvị trí\s+[A-Z]\d+\b/i.test(lower)) {
+      const m = lower.match(/\bvị trí\s+([A-Z]\d+)\b/i);
+      const pos = m ? m[1].toUpperCase() : null;
+      if (!pos) reply = "⚠️ Hãy nhập vị trí theo dạng ví dụ: 'vị trí B2 là quyển gì'";
       else {
-        const recap = await askGeminiForRecap(found.name, found.author);
-        reply = recap ? `📖 "${found.name}" (${found.author})\n📝 ${recap}` : "⚠️ Không thể tóm tắt ngay bây giờ.";
+        const { rows } = await pool.query("SELECT name, author, category FROM books WHERE position=$1 LIMIT 1", [pos]);
+        reply = rows.length
+          ? `📚 Ở vị trí ${pos}: "${rows[0].name}" (${rows[0].author})\nThể loại: ${rows[0].category || "Chưa rõ"}`
+          : `📭 Không có sách ở vị trí ${pos}.`;
       }
     }
 
-    // RECOMMEND BOOK
-    else if (intent === "recommend_book" || intent === "search_book") {
-      const kw = message.toLowerCase();
-      const related = books.filter(b =>
-        b.name.toLowerCase().includes(kw) ||
-        b.author.toLowerCase().includes(kw) ||
-        b.category.toLowerCase().includes(kw)
+    // RECAP (fix)
+    else if (/\b(tóm tắt|recap|summary)\b/i.test(lower)) {
+      let guess = message.replace(/["'‘’“”]/g, "").toLowerCase();
+      guess = guess.replace(/\b(recape?|tóm tắt|summary|giúp|cuốn|sách|hãy|nội dung|cho tôi|về|đi)\b/g, "").trim();
+
+      let target = null;
+      const q = await pool.query(
+        `SELECT name, author, category, position FROM books 
+         WHERE LOWER(name) LIKE $1 OR LOWER(author) LIKE $1 LIMIT 1`,
+        [`%${guess}%`]
       );
-      if (related.length === 0) reply = "⚠️ Không tìm thấy sách phù hợp trong thư viện.";
-      else if (related.length === 1) {
-        const b = related[0];
-        reply = `📘 "${b.name}" (${b.author}) - ${b.category}, vị trí ${b.position}`;
-      } else {
-        const pick = await askGeminiToChoose(message, related);
-        if (pick && pick.title) {
-          const chosen = related.find(b => b.name.toLowerCase() === pick.title.toLowerCase()) || related[0];
-          reply = `📘 "${chosen.name}" (${chosen.author}) - ${chosen.category}, vị trí ${chosen.position}\n💡 ${pick.reason || ""}`;
-        } else reply = "⚠️ Không tìm thấy sách phù hợp.";
+      if (q.rows.length) target = q.rows[0];
+
+      if (!target) {
+        const all = await pool.query("SELECT name, author, category, position FROM books");
+        for (const b of all.rows) {
+          if (message.toLowerCase().includes(b.name.toLowerCase())) { target = b; break; }
+        }
+      }
+
+      if (!target) reply = "⚠️ Mình chưa rõ bạn muốn tóm tắt quyển nào. Hãy nói tên sách cụ thể nhé.";
+      else {
+        const recap = await askGeminiForRecap(target.name, target.author);
+        reply = recap?.recap
+          ? `📖 "${target.name}" (${target.author})\nThể loại: ${target.category || "Chưa rõ"}, Vị trí: ${target.position}\n\n📝 ${recap.recap}`
+          : `⚠️ Không tóm tắt được lúc này.`;
       }
     }
 
-    // DEFAULT CHAT
+    // SEARCH or CHAT
     else {
-      reply = await chatWithGeminiFreeform(message, recent);
+      const { rows: books } = await pool.query("SELECT name, author, category, position FROM books");
+      const histRes = await pool.query("SELECT role, message FROM conversations ORDER BY id DESC LIMIT 6");
+      const recent = histRes.rows.reverse().map(r => `${r.role === "user" ? "Người dùng" : "Trợ lý"}: ${r.message}`).join("\n");
+
+      const keywords = message.toLowerCase();
+      const directMatch = books.filter(b =>
+        (b.name && b.name.toLowerCase().includes(keywords)) ||
+        (b.author && b.author.toLowerCase().includes(keywords)) ||
+        (b.category && b.category.toLowerCase().includes(keywords))
+      );
+
+      // nếu không có sách liên quan -> chat tự nhiên
+      if (!books.length || (!directMatch.length && /thời tiết|tâm trạng|ai là|là gì|tại sao|như thế nào|bao nhiêu|ở đâu|ai viết/i.test(message))) {
+        reply = await chatWithGeminiFreeform(message, recent);
+      } else {
+        let chosen = null;
+        if (directMatch.length === 1) {
+          chosen = directMatch[0];
+          reply = `📚 Gợi ý: "${chosen.name}" (${chosen.author})\nThể loại: ${chosen.category || "Chưa rõ"}, Vị trí: ${chosen.position}`;
+        } else {
+          const pick = await askGeminiToChoose(message, directMatch.length ? directMatch : books, recent);
+          if (pick && pick.title) {
+            const rec = (directMatch.length ? directMatch : books).find(b => b.name === pick.title) || books[0];
+            reply = `📚 Gợi ý: "${rec.name}" (${rec.author})\nThể loại: ${rec.category || "Chưa rõ"}, Vị trí: ${rec.position}\n💡 ${pick.reason || ""}`;
+          } else {
+            reply = await chatWithGeminiFreeform(message, recent);
+          }
+        }
+      }
     }
 
-    await pool.query("INSERT INTO conversations (role,message) VALUES ($1,$2)", ["assistant", reply]);
+    await pool.query("INSERT INTO conversations (role, message) VALUES ($1, $2)", ["assistant", reply]);
     res.json({ reply });
   } catch (err) {
     console.error("❌ Chat error:", err);
@@ -258,5 +305,6 @@ app.post("/chat", async (req, res) => {
   }
 });
 
+//cc
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Server đang chạy tại cổng ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Server đang chạy trên cổng ${PORT}`));
