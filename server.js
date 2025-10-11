@@ -1,4 +1,4 @@
-// server.js (v5.1: detect intent + recommend one best book + full context)
+// ===== server.js (v6: intent + recommend chính xác 1 quyển) =====
 import express from "express";
 import bodyParser from "body-parser";
 import pkg from "pg";
@@ -95,7 +95,7 @@ async function assignPosition(category) {
   return `${letter}${shelf}`;
 }
 
-// ===== Gemini functions =====
+// ===== Gemini core =====
 async function detectIntent(message) {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
   const prompt = `
@@ -210,7 +210,7 @@ app.post("/chat", async (req, res) => {
 
     let reply = "";
 
-    // ===== ADD BOOK =====
+    // === ADD BOOK ===
     if (intent === "add_book") {
       const match = message.match(/bn:\s*([^;]+);\s*at:\s*(.+)/i);
       if (!match) reply = "❌ Sai cú pháp. Dùng: add book: bn: Tên sách; at: Tác giả";
@@ -223,7 +223,7 @@ app.post("/chat", async (req, res) => {
         reply = `✅ Đã thêm "${bookName}" (${author})\nThể loại: ${category}\nVị trí: ${position}`;
       }
 
-    // ===== DELETE BOOK =====
+    // === DELETE BOOK ===
     } else if (intent === "delete_book") {
       const match = message.match(/bn:\s*([^;]+);\s*at:\s*(.+)/i);
       if (!match) reply = "❌ Sai cú pháp. Dùng: delete book: bn: Tên; at: Tác giả";
@@ -234,7 +234,7 @@ app.post("/chat", async (req, res) => {
         reply = result.rowCount ? `🗑️ Đã xoá "${bookName}" (${author})` : `⚠️ Không tìm thấy "${bookName}" (${author})`;
       }
 
-    // ===== ASK RECAP =====
+    // === ASK RECAP ===
     } else if (intent === "ask_recap") {
       const guess = message.replace(/["'‘’“”]/g, "").toLowerCase();
       const target = books.find(b => guess.includes(b.name.toLowerCase()) || guess.includes(b.author.toLowerCase()));
@@ -246,43 +246,72 @@ app.post("/chat", async (req, res) => {
           : "⚠️ Không thể tóm tắt ngay bây giờ.";
       }
 
-    // ===== RECOMMEND BOOK =====
+    // === RECOMMEND BOOK (logic fix) ===
     } else if (intent === "recommend_book") {
       const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-      const prompt = `
+      const understandPrompt = `
 Người dùng nói: "${message}"
-Bạn là thủ thư tâm lý. Hãy chọn **1 quyển duy nhất phù hợp nhất** trong thư viện với cảm xúc hoặc nhu cầu của người dùng.
-Nếu thư viện trống, gợi ý 1 sách nổi tiếng ngoài thư viện.
-Trả về rõ ràng:
-Tên sách, Tác giả, Thể loại (nếu có), và mô tả ngắn 2-3 câu.
+Hãy phân tích ý định hoặc cảm xúc của người dùng và trả về JSON:
+{"topic": "...", "category_guess": "..."}
 `;
-      const contextBooks = books.length
-        ? books.map(b => `- ${b.name} (${b.author}) [${b.category}]`).join("\n")
-        : "Thư viện hiện tại trống.";
 
-      const result = await model.generateContent({
-        contents: [{ role: "user", parts: [{ text: prompt + "\n\n" + contextBooks }] }],
+      let topic = "";
+      let catGuess = "Chưa rõ";
+      try {
+        const res = await model.generateContent({
+          contents: [{ role: "user", parts: [{ text: understandPrompt }] }],
+        });
+        const text = res.response.text();
+        const parsed = extractFirstJson(text);
+        topic = parsed?.topic || "";
+        catGuess = parsed?.category_guess || "Chưa rõ";
+      } catch (e) {
+        console.error("Gemini intent parse error:", e);
+      }
+
+      const query = (topic || message).toLowerCase();
+      const tokens = query.split(/\W+/).filter(Boolean);
+
+      const scored = books.map(b => {
+        const name = (b.name || "").toLowerCase();
+        const author = (b.author || "").toLowerCase();
+        const category = (b.category || "").toLowerCase();
+        let score = 0;
+
+        if (catGuess !== "chưa rõ" && category.includes(catGuess.toLowerCase())) score += 80;
+        for (const t of tokens) {
+          if (name.includes(t)) score += 20;
+          if (author.includes(t)) score += 10;
+          if (category.includes(t)) score += 8;
+        }
+        return { book: b, score };
       });
 
-      reply =
-        result.response?.candidates?.[0]?.content?.parts?.[0]?.text ||
-        result.response?.text() ||
-        "📚 Mình chưa nghĩ ra quyển nào phù hợp lúc này...";
+      scored.sort((a, b) => b.score - a.score);
+      const top = scored[0];
 
-    // ===== SEARCH BOOK =====
+      if (!top || top.score === 0) reply = "⚠️ Không tìm thấy sách phù hợp trong thư viện.";
+      else {
+        const pick = top.book;
+        reply = `📚 Mình nghĩ bạn sẽ thích:\n**${pick.name}** — ${pick.author}\nThể loại: ${pick.category}\nVị trí: ${pick.position}`;
+      }
+
+    // === SEARCH BOOK ===
     } else if (intent === "search_book") {
       const kw = message.toLowerCase();
       const found = books.filter(
         b =>
           b.name.toLowerCase().includes(kw) ||
           b.author.toLowerCase().includes(kw) ||
-          b.category.toLowerCase().includes(kw)
+          (b.category && b.category.toLowerCase().includes(kw))
       );
-      if (found.length)
-        reply = found.map(b => `📘 "${b.name}" (${b.author}) - ${b.category}, vị trí ${b.position}`).join("\n");
-      else reply = "⚠️ Không tìm thấy sách phù hợp.";
+      if (!found.length) reply = "⚠️ Không tìm thấy sách phù hợp trong thư viện.";
+      else {
+        const top = found[0];
+        reply = `📘 "${top.name}" (${top.author}) - ${top.category}, vị trí ${top.position}`;
+      }
 
-    // ===== DEFAULT CHAT =====
+    // === FREEFORM CHAT ===
     } else {
       reply = await chatWithGeminiFreeform(message, recent);
     }
@@ -295,5 +324,6 @@ Tên sách, Tác giả, Thể loại (nếu có), và mô tả ngắn 2-3 câu.
   }
 });
 
+// ===== SERVER START =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server đang chạy trên cổng ${PORT}`));
