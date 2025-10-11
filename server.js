@@ -241,22 +241,24 @@ app.post("/chat", async (req, res) => {
           : "⚠️ Không thể tóm tắt ngay bây giờ.";
       }
     } else if (intent === "recommend_book") {
-      const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-      const prompt = `
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const prompt = `
 Người dùng nói: "${message}"
 Bạn là thủ thư tâm lý, hãy gợi ý 1-3 cuốn trong thư viện phù hợp cảm xúc hoặc nhu cầu đó.
 Nếu thư viện trống, gợi ý vài sách nổi tiếng ngoài thư viện.
 `;
-      const contextBooks = books.length
-        ? books.map(b => `- ${b.name} (${b.author}) [${b.category}]`).join("\n")
-        : "Thư viện hiện tại trống.";
-      const result = await model.generateContent({
-        contents: [{ role: "user", parts: [{ text: prompt + "\n\n" + contextBooks }] }],
-      });
-      reply =
-        result.response?.candidates?.[0]?.content?.parts?.[0]?.text ||
-        result.response?.text() ||
-        "📚 Mình chưa nghĩ ra quyển nào phù hợp lúc này...";
+  const contextBooks = books.length
+    ? books.map(b => `- ${b.name} (${b.author}) [${b.category}]`).join("\n")
+    : "Thư viện hiện tại trống.";
+  const result = await model.generateContent({
+    contents: [{ role: "user", parts: [{ text: prompt + "\n\n" + contextBooks }] }],
+  });
+  reply =
+    result.response?.candidates?.[0]?.content?.parts?.[0]?.text ||
+    result.response?.text() ||
+    "📚 Mình chưa nghĩ ra quyển nào phù hợp lúc này...";
+}
+
     } else if (intent === "search_book") {
       const kw = message.toLowerCase();
       const found = books.filter(
