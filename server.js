@@ -1,4 +1,4 @@
-// server.js (final: natural chat + recap fix + full context)
+// server.js (final + web search grounding)
 import express from "express";
 import bodyParser from "body-parser";
 import pkg from "pg";
@@ -50,7 +50,6 @@ async function initTables() {
 }
 await initTables();
 
-// seed if needed (keeps behavior you used before)
 import("./seedBooks.js").catch(()=>{/* ignore if missing */});
 
 // ===== helpers =====
@@ -60,7 +59,7 @@ function extractFirstJson(text) {
   if (!match) return null;
   try {
     return JSON.parse(match[0]);
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -88,7 +87,10 @@ Trả về JSON duy nhất: {"category": "Thể loại"}
 `;
 
   try {
-    const response = await model.generateContent(prompt);
+    const response = await model.generateContent({
+      contents: prompt,
+      config: { tools: [{ google_search: {} }] }
+    });
     const raw = response.response.text();
     const parsed = extractFirstJson(raw);
     if (parsed && parsed.category) return parsed.category;
@@ -125,7 +127,10 @@ Trả về JSON duy nhất:
 `;
 
   try {
-    const response = await model.generateContent(prompt);
+    const response = await model.generateContent({
+      contents: prompt,
+      config: { tools: [{ google_search: {} }] }
+    });
     const raw = response.response.text();
     const parsed = extractFirstJson(raw);
     return parsed;
@@ -136,7 +141,6 @@ Trả về JSON duy nhất:
 
 async function askGeminiForRecap(bookTitle, author) {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
   const prompt = `
 Bạn là một trợ lý tóm tắt sách chuyên nghiệp.
 Tóm tắt ngắn (100-200 từ) nội dung, chủ đề và đối tượng người đọc của cuốn:
@@ -148,7 +152,10 @@ Trả về JSON duy nhất:
 `;
 
   try {
-    const response = await model.generateContent(prompt);
+    const response = await model.generateContent({
+      contents: prompt,
+      config: { tools: [{ google_search: {} }] }
+    });
     const raw = response.response.text();
     const parsed = extractFirstJson(raw);
     return parsed;
@@ -157,7 +164,7 @@ Trả về JSON duy nhất:
   }
 }
 
-// NEW: chat tự nhiên với Gemini nếu không liên quan đến sách
+// === natural freeform chat ===
 async function chatWithGeminiFreeform(message, context = "") {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
   const prompt = `
@@ -171,9 +178,13 @@ Hãy trả lời tự nhiên, ngắn gọn, dễ hiểu (bằng tiếng Việt).
 `;
 
   try {
-    const response = await model.generateContent(prompt);
+    const response = await model.generateContent({
+      contents: prompt,
+      config: { tools: [{ google_search: {} }] }
+    });
     return response.response.text();
   } catch (e) {
+    console.error("⚠️ chatWithGeminiFreeform error:", e);
     return "⚠️ Xin lỗi, mình chưa thể phản hồi lúc này.";
   }
 }
@@ -235,7 +246,7 @@ app.post("/chat", async (req, res) => {
       }
     }
 
-    // RECAP (fix)
+    // RECAP
     else if (/\b(tóm tắt|recap|summary)\b/i.test(lower)) {
       let guess = message.replace(/["'‘’“”]/g, "").toLowerCase();
       guess = guess.replace(/\b(recape?|tóm tắt|summary|giúp|cuốn|sách|hãy|nội dung|cho tôi|về|đi)\b/g, "").trim();
@@ -277,7 +288,6 @@ app.post("/chat", async (req, res) => {
         (b.category && b.category.toLowerCase().includes(keywords))
       );
 
-      // nếu không có sách liên quan -> chat tự nhiên
       if (!books.length || (!directMatch.length && /thời tiết|tâm trạng|ai là|là gì|tại sao|như thế nào|bao nhiêu|ở đâu|ai viết/i.test(message))) {
         reply = await chatWithGeminiFreeform(message, recent);
       } else {
@@ -304,6 +314,6 @@ app.post("/chat", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-//cc
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server đang chạy trên cổng ${PORT}`));
