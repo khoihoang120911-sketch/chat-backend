@@ -54,21 +54,40 @@ await initTables();
 import("./seedBooks.js").catch(()=>{/* ignore if missing */});
 
 // ===== helpers =====
-function extractFirstJson(text) {
-  if (!text || typeof text !== "string") return null;
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-  try {
-    return JSON.parse(match[0]);
-  } catch {
-    return null;
+
+// Danh sách thể loại hợp lệ
+const VALID_CATEGORIES = [
+  "Công nghệ",
+  "Văn học",
+  "Lịch sử",
+  "Kinh tế",
+  "Tâm lý",
+  "Giáo dục",
+  "Chính trị",
+  "Chưa rõ"
+];
+
+function normalizeCategory(input) {
+  if (!input) return "Chưa rõ";
+  input = input.trim().toLowerCase();
+  for (const c of VALID_CATEGORIES) {
+    if (c.toLowerCase() === input) return c;
   }
+  // kiểm tra gần đúng theo từ khóa
+  if (/(tech|code|ai|data|lập trình|máy tính)/i.test(input)) return "Công nghệ";
+  if (/(truyện|tiểu thuyết|văn học|novel|ký)/i.test(input)) return "Văn học";
+  if (/(lịch sử|chiến tranh|history|war)/i.test(input)) return "Lịch sử";
+  if (/(kinh tế|tài chính|business|economy)/i.test(input)) return "Kinh tế";
+  if (/(tâm lý|psychology)/i.test(input)) return "Tâm lý";
+  if (/(giáo dục|education)/i.test(input)) return "Giáo dục";
+  if (/(chính trị|politic)/i.test(input)) return "Chính trị";
+  return "Chưa rõ";
 }
 
 async function assignPosition(category) {
-  if (!category) return "X?";
-  const letter = category.trim()[0]?.toUpperCase() || "X";
-  const res = await pool.query("SELECT COUNT(*) FROM books WHERE category = $1", [category]);
+  const finalCategory = normalizeCategory(category);
+  const letter = finalCategory[0].toUpperCase();
+  const res = await pool.query("SELECT COUNT(*) FROM books WHERE category = $1", [finalCategory]);
   const count = parseInt(res.rows[0].count || "0", 10);
   const shelf = Math.floor(count / 15) + 1;
   return `${letter}${shelf}`;
@@ -78,32 +97,29 @@ async function inferCategory(bookName, author) {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
   const prompt = `
-Bạn là quản thủ thư viện thông minh.
-Dựa trên tên sách và tác giả, xác định THỂ LOẠI phù hợp nhất.
+Bạn là thủ thư chuyên nghiệp. Dựa trên tên và tác giả, chọn thể loại phù hợp nhất từ danh sách sau:
+${VALID_CATEGORIES.join(", ")}.
 
+Trả về JSON duy nhất: {"category": "Tên thể loại chính xác trong danh sách"}.
 Tên: "${bookName}"
 Tác giả: "${author}"
-
-Trả về JSON duy nhất: {"category": "Thể loại"}
 `;
 
   try {
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: prompt }] }]
     });
+
     const raw = result.response.text();
     const parsed = extractFirstJson(raw);
-    if (parsed && parsed.category) return parsed.category;
-
-    const titleLower = bookName.toLowerCase();
-    if (/(python|program|code|data|ai|machine)/i.test(titleLower)) return "Công nghệ";
-    if (/(tiểu thuyết|truyện|novel|poem|du ký|ký)/i.test(titleLower)) return "Văn học";
-    if (/(lịch sử|history|war|chiến tranh)/i.test(titleLower)) return "Lịch sử";
-    return "Chưa rõ";
-  } catch {
+    const chosen = normalizeCategory(parsed?.category);
+    return chosen;
+  } catch (e) {
+    console.error("⚠️ inferCategory error:", e);
     return "Chưa rõ";
   }
 }
+
 
 async function askGeminiToChoose(message, books, conversationContext = "") {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
@@ -167,32 +183,37 @@ Trả về JSON duy nhất:
 
 // ===== Chat tự nhiên có tra web =====
 async function chatWithGeminiFreeform(message, context = "") {
-  const model = genAI.getGenerativeModel({
-    model: "gemini-2.5-flash",
-    tools: [{ type: "google_search_retrieval" }]
-  });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
   const prompt = `
-Bạn là trợ lý AI thân thiện, thông minh, có thể tra cứu thông tin trên web khi cần.
+Bạn là trợ lý AI thân thiện, thông minh, nói chuyện tự nhiên bằng tiếng Việt.
+Bạn có thể sử dụng kiến thức hiện tại để trả lời chính xác, dễ hiểu.
+
 Ngữ cảnh trước đó:
 ${context}
 
 Người dùng: "${message}"
 
-Hãy trả lời tự nhiên, dễ hiểu (bằng tiếng Việt), sử dụng thông tin chính xác nếu cần tra web.
+Hãy trả lời ngắn gọn, chính xác, dễ hiểu và thân thiện.
 `;
 
   try {
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: prompt }] }]
     });
-    const text = result.response.text();
-    return text || "⚠️ Không có phản hồi từ Gemini.";
+
+    const text =
+      result.response?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      result.response?.text() ||
+      "⚠️ Không có phản hồi từ Gemini.";
+
+    return text;
   } catch (e) {
     console.error("⚠️ chatWithGeminiFreeform error:", e);
     return "⚠️ Xin lỗi, mình chưa thể phản hồi lúc này.";
   }
 }
+
 
 // ===== Serve index.html =====
 app.get("/", (req, res) => {
