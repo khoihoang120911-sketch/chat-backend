@@ -239,7 +239,7 @@ app.post("/chat", async (req, res) => {
         reply = recap
           ? `📖 "${target.name}" (${target.author})\n📝 ${recap}`
           : "⚠️ Không thể tóm tắt ngay bây giờ.";
-      }
+      
     } else if (intent === "recommend_book") {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
   const prompt = `
