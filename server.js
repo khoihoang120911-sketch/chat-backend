@@ -49,45 +49,44 @@ async function initTables() {
 }
 await initTables();
 
-// ===== Seed dữ liệu lần đầu =====
-import("./seedBooks.js");
+// ===== Helper: gán vị trí kệ tự động =====
+async function assignPosition(category) {
+  const letter = category ? category[0].toUpperCase() : "X";
 
-// ===== Helper: Suy luận thể loại & vị trí =====
-async function inferCategoryAndPosition(bookName, author) {
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-
-  const prompt = `
-Bạn là quản thủ thư viện thông minh. 
-Hãy suy luận THỂ LOẠI cho cuốn sách sau dựa vào tên và tác giả:
-
-Tên: "${bookName}"
-Tác giả: "${author}"
-
-Trả về JSON:
-{
-  "category": "tên thể loại ngắn gọn, ví dụ: Văn học, Khoa học, Tâm lý học...",
-  "positionRule": "Giải thích quy tắc xếp kệ"
+  const existing = await pool.query(
+    "SELECT COUNT(*) FROM books WHERE category=$1",
+    [category]
+  );
+  const count = parseInt(existing.rows[0].count || "0");
+  const shelf = Math.floor(count / 15) + 1; // mỗi kệ chứa 15 quyển
+  return `${letter}${shelf}`;
 }
 
-⚠️ KHÔNG viết thêm văn bản ngoài JSON.
-`;
+// ===== Helper: suy luận thể loại & vị trí từ Gemini =====
+async function inferCategoryAndPosition(bookName, author) {
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const prompt = `
+Bạn là quản thủ thư viện.
+Nhiệm vụ: Dựa trên thông tin web, xác định thể loại cho cuốn:
+- Tên: "${bookName}"
+- Tác giả: "${author}"
+
+Các thể loại hợp lệ (chọn gần nhất):
+["Văn học", "Lịch sử", "Khoa học", "Kinh tế", "Tâm lý", "Triết học", "Công nghệ", "Chính trị", "Giáo dục", "Khác"]
+
+Trả về JSON:
+{"category": "Thể loại"}
+  `;
 
   try {
     const response = await model.generateContent(prompt);
-    const data = JSON.parse(response.response.text());
-
-    // Tạo mã vị trí theo thể loại
-    const letter = data.category ? data.category[0].toUpperCase() : "X";
-
-    // Đếm xem đã có bao nhiêu sách cùng thể loại để tính kệ
-    const { rows } = await pool.query("SELECT COUNT(*) FROM books WHERE category=$1", [data.category]);
-    const count = parseInt(rows[0].count) || 0;
-    const shelf = Math.floor(count / 15) + 1; // mỗi kệ chứa 15 quyển
-    const position = `${letter}${shelf}`;
-
-    return { category: data.category || "Chưa rõ", position };
-  } catch (e) {
-    console.error("⚠️ Lỗi khi suy luận thể loại:", e.message);
+    const text = response.response.text();
+    const parsed = JSON.parse(text);
+    const category = parsed.category || "Chưa rõ";
+    const position = await assignPosition(category);
+    return { category, position };
+  } catch (err) {
+    console.error("❌ Lỗi khi suy luận thể loại:", err);
     return { category: "Chưa rõ", position: "X?" };
   }
 }
@@ -103,11 +102,12 @@ app.post("/chat", async (req, res) => {
   if (!message) return res.status(400).json({ error: "Thiếu 'message'" });
 
   try {
+    // Lưu user message
     await pool.query("INSERT INTO conversations (role, message) VALUES ($1,$2)", ["user", message]);
 
     let reply = "";
 
-    // ===== ADD BOOK =====
+    // ===== Add book =====
     if (message.toLowerCase().startsWith("add book")) {
       const match = message.match(/bn:\s*([^;]+);\s*at:\s*(.+)/i);
       if (match) {
@@ -115,6 +115,7 @@ app.post("/chat", async (req, res) => {
         const author = match[2].trim();
 
         const { category, position } = await inferCategoryAndPosition(bookName, author);
+
         await pool.query(
           "INSERT INTO books (name, author, category, position) VALUES ($1,$2,$3,$4)",
           [bookName, author, category, position]
@@ -126,7 +127,7 @@ app.post("/chat", async (req, res) => {
       }
     }
 
-    // ===== DELETE BOOK =====
+    // ===== Delete book =====
     else if (message.toLowerCase().startsWith("delete book")) {
       const match = message.match(/bn:\s*([^;]+);\s*at:\s*(.+)/i);
       if (match) {
@@ -134,64 +135,80 @@ app.post("/chat", async (req, res) => {
         const author = match[2].trim();
 
         const result = await pool.query("DELETE FROM books WHERE name=$1 AND author=$2 RETURNING *", [bookName, author]);
-        reply = result.rowCount
-          ? `🗑️ Đã xoá sách "${bookName}" của ${author}`
-          : `⚠️ Không tìm thấy sách "${bookName}" của ${author}`;
+        if (result.rowCount > 0) {
+          reply = `🗑️ Đã xoá sách "${bookName}" của ${author}`;
+        } else {
+          reply = `⚠️ Không tìm thấy sách "${bookName}" của ${author}`;
+        }
       } else {
         reply = "❌ Sai cú pháp. Hãy dùng: `delete book: bn: Tên sách; at: Tác giả`";
       }
     }
 
-    // ===== GEMINI TÌM SÁCH =====
+    // ===== Gợi ý / Chat thông minh =====
     else {
-      const { rows: books } = await pool.query("SELECT name, author, category, position FROM books");
-      if (books.length === 0) return res.json({ reply: "📭 Thư viện hiện chưa có sách." });
+      const result = await pool.query("SELECT name, author, category, position FROM books");
+      const books = result.rows;
 
-      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-      const prompt = `
-Người dùng vừa nói: "${message}".
-Đây là danh sách sách trong thư viện (JSON): ${JSON.stringify(books, null, 2)}.
+      if (books.length === 0) {
+        reply = "📭 Thư viện hiện chưa có sách.";
+      } else {
+        // Lấy lịch sử hội thoại gần nhất để duy trì ngữ cảnh
+        const history = await pool.query(
+          "SELECT role, message FROM conversations ORDER BY id DESC LIMIT 10"
+        );
+        const messages = history.rows.reverse();
 
-Yêu cầu:
-- Chỉ chọn 1 cuốn sách trong danh sách trên, KHÔNG bịa thêm.
-- Phải trả về JSON hợp lệ:
+        let context = "";
+        for (const msg of messages) {
+          context += `${msg.role === "user" ? "👤 Người dùng" : "🤖 Trợ lý"}: ${msg.message}\n`;
+        }
+
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+        const prompt = `
+Bạn là trợ lý thư viện thông minh.
+Dưới đây là đoạn hội thoại trước:
+${context}
+
+Người dùng vừa nói: "${message}"
+
+Danh sách sách trong thư viện:
+${JSON.stringify(books, null, 2)}
+
+Nhiệm vụ:
+1. Chọn cuốn sách phù hợp nhất (nếu có).
+2. Trả về JSON:
 {
-  "title": "Tên sách trong DB",
-  "author": "Tác giả trong DB",
-  "category": "Thể loại trong DB",
-  "location": "Vị trí trong DB",
-  "reason": "Lý do chọn cuốn này"
-}`;
+  "title": "Tên sách",
+  "author": "Tác giả",
+  "category": "Thể loại",
+  "location": "Vị trí",
+  "reason": "Lý do gợi ý"
+}
+Nếu không tìm được, trả về {"title": "", "reason": "Không rõ"}.
+`;
 
-      const response = await model.generateContent(prompt);
-      const raw = response.response.text();
-      console.log("🧠 Gemini raw output:", raw);
+        const response = await model.generateContent(prompt);
+        const raw = response.response.text();
 
-      try {
-        const book = JSON.parse(raw);
-        reply = `📚 Gợi ý: "${book.title}" (${book.author})
-Thể loại: ${book.category}, Vị trí: ${book.location}
-💡 Lý do: ${book.reason}`;
-      } catch (e) {
-        console.warn("⚠️ Lỗi parse Gemini output:", e.message);
-
-        // fallback chọn sách gần khớp
-        const keyword = message.toLowerCase();
-        const fallback =
-          books.find(b => keyword.includes(b.category?.toLowerCase())) ||
-          books.find(b => keyword.includes(b.name?.toLowerCase())) ||
-          books[Math.floor(Math.random() * books.length)];
-
-        reply = `📚 Gợi ý: "${fallback.name}" (${fallback.author})
-Thể loại: ${fallback.category}, Vị trí: ${fallback.position}
-💡 Lý do: Tôi chọn cuốn này vì nó có vẻ phù hợp với yêu cầu của bạn.`;
+        try {
+          const book = JSON.parse(raw);
+          if (book.title) {
+            reply = `📚 Gợi ý: "${book.title}" (${book.author})\nThể loại: ${book.category}, Vị trí: ${book.location}\n💡 Lý do: ${book.reason}`;
+          } else {
+            reply = "🤔 Tôi chưa tìm ra cuốn nào phù hợp.";
+          }
+        } catch {
+          reply = "🤔 Tôi chưa tìm ra cuốn nào phù hợp.";
+        }
       }
     }
 
     await pool.query("INSERT INTO conversations (role, message) VALUES ($1,$2)", ["assistant", reply]);
     res.json({ reply });
   } catch (err) {
-    console.error("❌ Chat error:", err);
+    console.error("Chat error:", err);
     res.status(500).json({ error: err.message });
   }
 });
