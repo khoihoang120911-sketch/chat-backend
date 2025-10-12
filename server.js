@@ -75,33 +75,41 @@ async function assignPosition(category) {
 }
 
 async function inferCategory(bookName, author) {
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const lower = bookName.toLowerCase();
 
-  const prompt = `
-Bạn là quản thủ thư viện thông minh.
-Dựa trên tên sách và tác giả, xác định THỂ LOẠI phù hợp nhất.
+  // ===== 1️⃣ Tự động nhận dạng theo từ khóa (chạy cực nhanh, không gọi API) =====
+  if (/(lịch sử|history|sử ký|cách mạng|chiến tranh|revolution|empire)/i.test(lower)) return "Lịch sử";
+  if (/(python|lập trình|code|js|java|react|data|ai|machine|khoa học máy tính|dev)/i.test(lower)) return "Công nghệ";
+  if (/(tâm lý|đắc nhân tâm|thói quen|hành vi|động lực|phát triển bản thân|self-help|self help|motivation)/i.test(lower)) return "Tâm lý";
+  if (/(kinh tế|đầu tư|tài chính|money|economics|business|market)/i.test(lower)) return "Kinh tế";
+  if (/(văn học|tiểu thuyết|thơ|truyện|novel|story|poem|ký)/i.test(lower)) return "Văn học";
+  if (/(triết học|philosophy|đạo đức|chính trị|tư tưởng)/i.test(lower)) return "Triết học";
+  if (/(giáo dục|education|học tập|sư phạm)/i.test(lower)) return "Giáo dục";
+  if (/(y học|medicine|bệnh|sức khỏe|health|chăm sóc)/i.test(lower)) return "Y học";
 
-Tên: "${bookName}"
+  // ===== 2️⃣ Nếu không chắc, hỏi Gemini để dự đoán =====
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    const prompt = `
+Xác định thể loại sách phù hợp nhất (chỉ một từ) trong các loại sau:
+["Văn học","Lịch sử","Tâm lý","Công nghệ","Kinh tế","Triết học","Giáo dục","Y học","Chính trị","Khác"]
+
+Tên sách: "${bookName}"
 Tác giả: "${author}"
 
-Trả về JSON duy nhất: {"category": "Thể loại"}
+Chỉ trả về JSON dạng:
+{"category":"<Tên thể loại>"}
 `;
-
-  try {
-    const response = await model.generateContent(prompt);
-    const raw = response.response.text();
+    const result = await model.generateContent(prompt);
+    const raw = result.response.text();
     const parsed = extractFirstJson(raw);
-    if (parsed && parsed.category) return parsed.category;
-
-    const titleLower = bookName.toLowerCase();
-    if (/(python|program|code|data|ai|machine)/i.test(titleLower)) return "Công nghệ";
-    if (/(tiểu thuyết|truyện|novel|poem|du ký|ký)/i.test(titleLower)) return "Văn học";
-    if (/(lịch sử|history|war|chiến tranh)/i.test(titleLower)) return "Lịch sử";
-    return "Chưa rõ";
-  } catch {
-    return "Chưa rõ";
+    return parsed?.category || "Khác";
+  } catch (e) {
+    console.error("⚠️ inferCategory error:", e);
+    return "Khác";
   }
 }
+
 
 async function askGeminiToChoose(message, books, conversationContext = "") {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
